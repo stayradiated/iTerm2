@@ -104,8 +104,8 @@ static const BOOL USE_THIN_SPLITTERS = YES;
 {
     warningImage = [[NSImage imageNamed:@"important"] retain];
 
-    normalStateColor = [NSColor blackColor];
-    chosenStateColor = [NSColor blackColor];
+    normalStateColor = [NSColor whiteColor];
+    chosenStateColor = [NSColor whiteColor];
     idleStateColor = [NSColor redColor];
     newOutputStateColor = [NSColor purpleColor];
     deadStateColor = [NSColor grayColor];
