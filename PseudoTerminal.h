@@ -411,6 +411,10 @@ NSWindowDelegate,
 // sessions to fit the new window size.
 - (void)sessionInitiatedResize:(PTYSession*)session width:(int)width height:(int)height;
 
+// Resize the window to a given pixel size. A nearby size will be used if possible, but minimum size
+// constraints will be respected.
+- (void)setFrameSize:(NSSize)newSize;
+
 // Open the session preference panel.
 - (void)editCurrentSession:(id)sender;
 - (void)editSession:(PTYSession*)session;
@@ -596,9 +600,6 @@ NSWindowDelegate,
 // Fill in a path with the tabbar color.
 - (void)fillPath:(NSBezierPath*)path;
 
-// Resize the window to exactly fit this tab.
-- (void)fitWindowToTab:(PTYTab*)tab;
-
 // Resize window to be just large enough to fit the largest tab without changing session sizes.
 - (void)fitWindowToTabs;
 
@@ -652,8 +653,6 @@ NSWindowDelegate,
           addingSession:(PTYSession*)newSession
           targetSession:(PTYSession*)targetSession
            performSetup:(BOOL)performSetup;
-
-- (void)splitVertically:(BOOL)isVertical withBookmark:(Profile*)theBookmark targetSession:(PTYSession*)targetSession;
 
 
 // Do some cleanup after a session is removed.

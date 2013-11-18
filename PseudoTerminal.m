@@ -58,7 +58,7 @@
 #import "FakeWindow.h"
 #import "PSMTabBarControl.h"
 #import "PSMTabStyle.h"
-#import <iTermGrowlDelegate.h>
+#import "iTermGrowlDelegate.h"
 #include <unistd.h>
 #import "PasteboardHistory.h"
 #import "PTYTab.h"
@@ -509,7 +509,7 @@ NSString *sessionsKey = @"sessions";
           reducedTabviewFrame.size.height -= 1;
         }
         NSRect divisionViewFrame = NSMakeRect(reducedTabviewFrame.origin.x,
-                                              reducedTabviewFrame.size.height,
+                                              reducedTabviewFrame.size.height + reducedTabviewFrame.origin.y,
                                               reducedTabviewFrame.size.width,
                                               1);
         if (_divisionView) {
@@ -962,7 +962,7 @@ NSString *sessionsKey = @"sessions";
 // Save the current scroll position
 - (IBAction)saveScrollPosition:(id)sender
 {
-    [[self currentSession] saveScrollPosition];
+    [[self currentSession] screenSaveScrollPosition];
 }
 
 // Jump to the saved scroll position
@@ -2946,8 +2946,8 @@ NSString *sessionsKey = @"sessions";
         [[aSession TEXTVIEW] setNeedsDisplay:YES];
         [aSession updateDisplay];
         [aSession scheduleUpdateIn:kFastTimerIntervalSec];
-		[self setDimmingForSession:aSession];
-		[[aSession view] setBackgroundDimmed:![[self window] isKeyWindow]];
+                [self setDimmingForSession:aSession];
+                [[aSession view] setBackgroundDimmed:![[self window] isKeyWindow]];
     }
 
     for (PTYSession *session in [self sessions]) {
@@ -3018,8 +3018,8 @@ NSString *sessionsKey = @"sessions";
     NSLog(@"%s(%d):-[PseudoTerminal tabView:willRemoveTabViewItem]", __FILE__, __LINE__);
 #endif
     [self saveAffinitiesLater:[tabViewItem identifier]];
-	iTermApplicationDelegate *itad = (iTermApplicationDelegate *)[[iTermApplication sharedApplication] delegate];
-	[itad updateBroadcastMenuState];
+        iTermApplicationDelegate *itad = (iTermApplicationDelegate *)[[iTermApplication sharedApplication] delegate];
+        [itad updateBroadcastMenuState];
 }
 
 - (void)tabView:(NSTabView *)tabView willAddTabViewItem:(NSTabViewItem *)tabViewItem
@@ -3030,8 +3030,8 @@ NSString *sessionsKey = @"sessions";
 
     [self tabView:tabView willInsertTabViewItem:tabViewItem atIndex:[tabView numberOfTabViewItems]];
     [self saveAffinitiesLater:[tabViewItem identifier]];
-	iTermApplicationDelegate *itad = (iTermApplicationDelegate *)[[iTermApplication sharedApplication] delegate];
-	[itad updateBroadcastMenuState];
+        iTermApplicationDelegate *itad = (iTermApplicationDelegate *)[[iTermApplication sharedApplication] delegate];
+        [itad updateBroadcastMenuState];
 }
 
 - (void)tabView:(NSTabView *)tabView willInsertTabViewItem:(NSTabViewItem *)tabViewItem atIndex:(int)anIndex
@@ -3047,8 +3047,8 @@ NSString *sessionsKey = @"sessions";
       [[theTab tmuxController] setClientSize:[theTab tmuxSize]];
     }
     [self saveAffinitiesLater:[tabViewItem identifier]];
-	iTermApplicationDelegate *itad = (iTermApplicationDelegate *)[[iTermApplication sharedApplication] delegate];
-	[itad updateBroadcastMenuState];
+        iTermApplicationDelegate *itad = (iTermApplicationDelegate *)[[iTermApplication sharedApplication] delegate];
+        [itad updateBroadcastMenuState];
 }
 
 - (BOOL)tabView:(NSTabView*)tabView shouldCloseTabViewItem:(NSTabViewItem *)tabViewItem
@@ -3637,7 +3637,7 @@ NSString *sessionsKey = @"sessions";
 
     // set our preferences
     [newSession setAddressBookEntry:[oldSession addressBookEntry]];
-    [[newSession SCREEN] setScrollback:0];
+    [[newSession SCREEN] setMaxScrollbackLines:0];
     [self setupSession:newSession title:nil withSize:nil];
     [[newSession view] setViewId:[[oldSession view] viewId]];
 
@@ -3839,8 +3839,8 @@ NSString *sessionsKey = @"sessions";
                                            verticalSpacing:[[theBookmark objectForKey:KEY_VERTICAL_SPACING] floatValue]];
     NSSize charSize = NSMakeSize(MAX(asciiCharSize.width, nonAsciiCharSize.width),
                                  MAX(asciiCharSize.height, nonAsciiCharSize.height));
-    NSSize newSessionSize = NSMakeSize(charSize.width * MIN_SESSION_COLUMNS + MARGIN * 2,
-                                       charSize.height * MIN_SESSION_ROWS + VMARGIN * 2);
+    NSSize newSessionSize = NSMakeSize(charSize.width * kVT100ScreenMinColumns + MARGIN * 2,
+                                       charSize.height * kVT100ScreenMinRows + VMARGIN * 2);
 
     return [[self currentTab] canSplitVertically:isVertical withSize:newSessionSize];
 }
@@ -4314,10 +4314,10 @@ NSString *sessionsKey = @"sessions";
 - (BroadcastMode)broadcastMode
 {
     if ([[self currentTab] isBroadcasting]) {
-		    return BROADCAST_TO_ALL_PANES;
-	} else {
-		    return broadcastMode_;
-	}
+                    return BROADCAST_TO_ALL_PANES;
+        } else {
+                    return broadcastMode_;
+        }
 }
 
 - (void)setBroadcastMode:(BroadcastMode)mode
@@ -4334,14 +4334,14 @@ NSString *sessionsKey = @"sessions";
             return;
         }
     }
-	if (mode == BROADCAST_TO_ALL_PANES) {
-		[[self currentTab] setBroadcasting:YES];
-		mode = BROADCAST_OFF;
-	} else {
-		[[self currentTab] setBroadcasting:NO];
-	}
+        if (mode == BROADCAST_TO_ALL_PANES) {
+                [[self currentTab] setBroadcasting:YES];
+                mode = BROADCAST_OFF;
+        } else {
+                [[self currentTab] setBroadcasting:NO];
+        }
     broadcastMode_ = mode;
-	[self setDimmingForSessions];
+        [self setDimmingForSessions];
     iTermApplicationDelegate *itad = (iTermApplicationDelegate *)[[iTermApplication sharedApplication] delegate];
     [itad updateBroadcastMenuState];
 }
@@ -4484,9 +4484,9 @@ NSString *sessionsKey = @"sessions";
 
 - (void)setDimmingForSessions
 {
-	for (PTYSession *aSession in [self sessions]) {
-		[self setDimmingForSession:aSession];
-	}
+        for (PTYSession *aSession in [self sessions]) {
+                [self setDimmingForSession:aSession];
+        }
 }
 
 - (BOOL)anyTabIsTmuxTab
@@ -4629,6 +4629,17 @@ NSString *sessionsKey = @"sessions";
     iTermApplicationDelegate *itad = [[iTermApplication sharedApplication] delegate];
     [itad setFutureApplicationPresentationOptions:0
                                             unset:flags];
+}
+
+- (void)setFrameSize:(NSSize)newSize
+{
+    NSSize size = [self windowWillResize:[self window] toSize:newSize];
+    NSRect frame = [[self window] frame];
+    [[self window] setFrame:NSMakeRect(frame.origin.x,
+                                       frame.origin.y,
+                                       size.width,
+                                       size.height)
+                    display:YES];
 }
 
 // Grow or shrink the tabview to make room for the find bar in fullscreen mode
@@ -5180,8 +5191,6 @@ NSString *sessionsKey = @"sessions";
         PtyLog(@"setupSession - call setPreferencesFromAddressBookEntry");
         [aSession setPreferencesFromAddressBookEntry:tempPrefs];
         [aSession setBookmarkName:[tempPrefs objectForKey:KEY_NAME]];
-        [[aSession SCREEN] setDisplay:[aSession TEXTVIEW]];
-        [[aSession TERMINAL] setTrace:YES];    // debug vt100 escape sequence decode
 
         if (title) {
             [aSession setName:title];
@@ -5437,7 +5446,6 @@ NSString *sessionsKey = @"sessions";
 - (IBAction)resetCharset:(id)sender
 {
     [[[self currentSession] TERMINAL] resetCharset];
-    [[[self currentSession] SCREEN] resetCharset];
 }
 
 // Clear the buffer of the current session.
@@ -5538,7 +5546,7 @@ NSString *sessionsKey = @"sessions";
             result = NO;
         }
     } else if ([item action] == @selector(resetCharset:)) {
-        result = ![[[self currentSession] SCREEN] usingDefaultCharset];
+        result = ![[[self currentSession] SCREEN] allCharacterSetPropertiesHaveDefaultValues];
     }
     return result;
 }
@@ -5772,7 +5780,7 @@ NSString *sessionsKey = @"sessions";
     aSession = [[PTYSession alloc] init];
 
     [[aSession SCREEN] setUnlimitedScrollback:[[bookmark objectForKey:KEY_UNLIMITED_SCROLLBACK] boolValue]];
-    [[aSession SCREEN] setScrollback:[[bookmark objectForKey:KEY_SCROLLBACK_LINES] intValue]];
+    [[aSession SCREEN] setMaxScrollbackLines:[[bookmark objectForKey:KEY_SCROLLBACK_LINES] intValue]];
 
     // set our preferences
     [aSession setAddressBookEntry:bookmark];
@@ -5915,7 +5923,7 @@ NSString *sessionsKey = @"sessions";
     // Initialize a new session
     aSession = [[PTYSession alloc] init];
     [[aSession SCREEN] setUnlimitedScrollback:[[addressbookEntry objectForKey:KEY_UNLIMITED_SCROLLBACK] boolValue]];
-    [[aSession SCREEN] setScrollback:[[addressbookEntry objectForKey:KEY_SCROLLBACK_LINES] intValue]];
+    [[aSession SCREEN] setMaxScrollbackLines:[[addressbookEntry objectForKey:KEY_SCROLLBACK_LINES] intValue]];
 
     // set our preferences
     [aSession setAddressBookEntry:addressbookEntry];
@@ -6066,7 +6074,7 @@ NSString *sessionsKey = @"sessions";
     // Initialize a new session
     aSession = [[PTYSession alloc] init];
     [[aSession SCREEN] setUnlimitedScrollback:[[addressbookEntry objectForKey:KEY_UNLIMITED_SCROLLBACK] boolValue]];
-    [[aSession SCREEN] setScrollback:[[addressbookEntry objectForKey:KEY_SCROLLBACK_LINES] intValue]];
+    [[aSession SCREEN] setMaxScrollbackLines:[[addressbookEntry objectForKey:KEY_SCROLLBACK_LINES] intValue]];
     // set our preferences
     [aSession setAddressBookEntry: addressbookEntry];
     // Add this session to our term and make it current
@@ -6137,7 +6145,7 @@ NSString *sessionsKey = @"sessions";
     // Initialize a new session
     aSession = [[PTYSession alloc] init];
     [[aSession SCREEN] setUnlimitedScrollback:[[addressbookEntry objectForKey:KEY_UNLIMITED_SCROLLBACK] boolValue]];
-    [[aSession SCREEN] setScrollback:[[addressbookEntry objectForKey:KEY_SCROLLBACK_LINES] intValue]];
+    [[aSession SCREEN] setMaxScrollbackLines:[[addressbookEntry objectForKey:KEY_SCROLLBACK_LINES] intValue]];
     // set our preferences
     [aSession setAddressBookEntry: addressbookEntry];
     // Add this session to our term and make it current

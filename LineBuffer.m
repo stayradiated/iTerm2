@@ -27,7 +27,7 @@
  **  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-#import <LineBuffer.h>
+#import "LineBuffer.h"
 #import "RegexKitLite/RegexKitLite.h"
 #import "BackgroundThread.h"
 
@@ -119,6 +119,28 @@ static char* formatsct(screen_char_t* src, int len, char* dest) {
     }
     dest[i] = 0;
     return dest;
+}
+
+- (void)appendToDebugString:(NSMutableString *)s
+{
+    char temp[1000];
+    int i;
+    int prev;
+    if (first_entry > 0) {
+        prev = cumulative_line_lengths[first_entry - 1];
+    } else {
+        prev = 0;
+    }
+    for (i = first_entry; i < cll_entries; ++i) {
+        BOOL iscont = (i == cll_entries-1) && is_partial;
+        formatsct(buffer_start + prev - start_offset,
+                  cumulative_line_lengths[i] - prev,
+                  temp);
+        [s appendFormat:@"%s%c\n",
+         temp,
+         iscont ? '+' : '!'];
+        prev = cumulative_line_lengths[i];
+    }
 }
 
 - (void)dump:(int)rawOffset
@@ -816,8 +838,15 @@ static int Search(NSString* needle,
                                            &charHaystack,
                                            &deltas);
         int numUnichars = [haystack length];
+        const unsigned long long kMaxSaneStringLength = 1000000000LL;
         do {
             haystack = CharArrayToString(charHaystack, numUnichars);
+            if ([haystack length] >= kMaxSaneStringLength) {
+                // There's a bug in OS 10.9.0 (and possibly other versions) where the string
+                // @"a⃑" reports a length of 0x7fffffffffffffff, which causes this loop to never
+                // terminate.
+                break;
+            }
             tempPosition = CoreSearch(needle, rawline, raw_line_length, 0, limit, options,
                                       &tempResultLength, haystack, charHaystack, deltas, 0);
 
@@ -1101,6 +1130,15 @@ static int RawNumLines(LineBuffer* buffer, int width) {
     return nl - RawNumLines(self, width);
 }
 
+- (NSString *)debugString {
+    NSMutableString *s = [NSMutableString string];
+    for (int i = 0; i < [blocks count]; i++) {
+        LineBlock *block = [blocks objectAtIndex:i];
+        [block appendToDebugString:s];
+    }
+    return [s length] ? [s substringToIndex:s.length - 1] : @"";  // strip trailing newline
+}
+
 - (void) dump
 {
     int i;
@@ -1110,6 +1148,27 @@ static int RawNumLines(LineBuffer* buffer, int width) {
         [[blocks objectAtIndex: i] dump:rawOffset];
         rawOffset += [[blocks objectAtIndex:i] rawSpaceUsed];
     }
+}
+
+- (NSString *)compactLineDumpWithWidth:(int)width {
+    NSMutableString *s = [NSMutableString string];
+    int n = [self numLinesWithWidth:width];
+    for (int i = 0; i < n; i++) {
+        ScreenCharArray *line = [self wrappedLineAtIndex:i width:width];
+        [s appendFormat:@"%@", ScreenCharArrayToStringDebug(line.line, line.length)];
+        for (int j = line.length; j < width; j++) {
+            [s appendString:@"."];
+        }
+        if (i < n - 1) {
+            [s appendString:@"\n"];
+        }
+    }
+    return s;
+}
+
+- (void)dumpWrappedToWidth:(int)width
+{
+    NSLog(@"%@", [self compactLineDumpWithWidth:width]);
 }
 
 - (LineBuffer*)init
@@ -1408,110 +1467,103 @@ static int RawNumLines(LineBuffer* buffer, int width) {
 
 - (void)initFind:(NSString*)substring startingAt:(int)start options:(int)options withContext:(FindContext*)context
 {
-    context->substring = [[NSString alloc] initWithString:substring];
-    context->options = options;
+    context.substring = [[NSString alloc] initWithString:substring];
+    context.options = options;
     if (options & FindOptBackwards) {
-        context->dir = -1;
+        context.dir = -1;
     } else {
-        context->dir = 1;
+        context.dir = 1;
     }
-    if ([self _findPosition:start inBlock:&context->absBlockNum inOffset:&context->offset]) {
-        context->absBlockNum += num_dropped_blocks;
-        context->status = Searching;
+    int offset = context.offset;
+    int absBlockNum = context.absBlockNum;
+    if ([self _findPosition:start inBlock:&absBlockNum inOffset:&offset]) {
+        context.offset = offset;
+        context.absBlockNum = absBlockNum + num_dropped_blocks;
+        context.status = Searching;
     } else {
-        context->status = NotFound;
+        context.status = NotFound;
     }
-    context->results = [[NSMutableArray alloc] init];
-}
-
-- (void)releaseFind:(FindContext*)context
-{
-    if (context->substring) {
-        [context->substring release];
-        context->substring = nil;
-    }
-    [context->results release];
+    context.results = [NSMutableArray array];
 }
 
 - (void)findSubstring:(FindContext*)context stopAt:(int)stopAt
 {
-    if (context->dir > 0) {
+    if (context.dir > 0) {
         // Search forwards
-        if (context->absBlockNum < num_dropped_blocks) {
+        if (context.absBlockNum < num_dropped_blocks) {
             // The next block to search was dropped. Skip ahead to the first block.
             // NSLog(@"Next to search was dropped. Skip to start");
-            context->absBlockNum = num_dropped_blocks;
+            context.absBlockNum = num_dropped_blocks;
         }
-        if (context->absBlockNum - num_dropped_blocks >= [blocks count]) {
+        if (context.absBlockNum - num_dropped_blocks >= [blocks count]) {
             // Got to bottom
             // NSLog(@"Got to bottom");
-            context->status = NotFound;
+            context.status = NotFound;
             return;
         }
     } else {
         // Search backwards
-        if (context->absBlockNum < num_dropped_blocks) {
+        if (context.absBlockNum < num_dropped_blocks) {
             // Got to top
             // NSLog(@"Got to top");
-            context->status = NotFound;
+            context.status = NotFound;
             return;
         }
     }
 
-    NSAssert(context->absBlockNum - num_dropped_blocks >= 0, @"bounds check");
-    NSAssert(context->absBlockNum - num_dropped_blocks < [blocks count], @"bounds check");
-    LineBlock* block = [blocks objectAtIndex:context->absBlockNum - num_dropped_blocks];
+    NSAssert(context.absBlockNum - num_dropped_blocks >= 0, @"bounds check");
+    NSAssert(context.absBlockNum - num_dropped_blocks < [blocks count], @"bounds check");
+    LineBlock* block = [blocks objectAtIndex:context.absBlockNum - num_dropped_blocks];
 
-    if (context->absBlockNum - num_dropped_blocks == 0 &&
-        context->offset != -1 &&
-        context->offset < [block startOffset]) {
-        if (context->dir > 0) {
+    if (context.absBlockNum - num_dropped_blocks == 0 &&
+        context.offset != -1 &&
+        context.offset < [block startOffset]) {
+        if (context.dir > 0) {
             // Part of the first block has been dropped. Skip ahead to its
             // current beginning.
-            context->offset = [block startOffset];
+            context.offset = [block startOffset];
         } else {
             // This block has scrolled off.
-            // NSLog(@"offset=%d, block's startOffset=%d. give up", context->offset, [block startOffset]);
-            context->status = NotFound;
+            // NSLog(@"offset=%d, block's startOffset=%d. give up", context.offset, [block startOffset]);
+            context.status = NotFound;
             return;
         }
     }
 
-    // NSLog(@"search block %d starting at offset %d", context->absBlockNum - num_dropped_blocks, context->offset);
+    // NSLog(@"search block %d starting at offset %d", context.absBlockNum - num_dropped_blocks, context.offset);
 
-    [block findSubstring:context->substring
-                 options:context->options
-                atOffset:context->offset
-                 results:context->results
-         multipleResults:((context->options & FindMultipleResults) != 0)];
-    NSMutableArray* filtered = [NSMutableArray arrayWithCapacity:[context->results count]];
+    [block findSubstring:context.substring
+                 options:context.options
+                atOffset:context.offset
+                 results:context.results
+         multipleResults:((context.options & FindMultipleResults) != 0)];
+    NSMutableArray* filtered = [NSMutableArray arrayWithCapacity:[context.results count]];
     BOOL haveOutOfRangeResults = NO;
-    int blockPosition = [self _blockPosition:context->absBlockNum - num_dropped_blocks];
-    for (ResultRange* range in context->results) {
+    int blockPosition = [self _blockPosition:context.absBlockNum - num_dropped_blocks];
+    for (ResultRange* range in context.results) {
         range->position += blockPosition;
-        if (context->dir * (range->position - stopAt) > 0 ||
-            context->dir * (range->position + context->matchLength - stopAt) > 0) {
+        if (context.dir * (range->position - stopAt) > 0 ||
+            context.dir * (range->position + context.matchLength - stopAt) > 0) {
             // result was outside the range to be searched
             haveOutOfRangeResults = YES;
         } else {
             // Found a good result.
-            context->status = Matched;
+            context.status = Matched;
             [filtered addObject:range];
         }
     }
-    [context->results release];
-    context->results = [filtered retain];
+    context.results = [filtered retain];
     if ([filtered count] == 0 && haveOutOfRangeResults) {
-        context->status = NotFound;
+        context.status = NotFound;
     }
 
     // Prepare to continue searching next block.
-    if (context->dir < 0) {
-        context->offset = -1;
+    if (context.dir < 0) {
+        context.offset = -1;
     } else {
-        context->offset = 0;
+        context.offset = 0;
     }
-    context->absBlockNum += context->dir;
+    context.absBlockNum = context.absBlockNum + context.dir;
 }
 
 // Returns an array of XRange values
@@ -1601,6 +1653,19 @@ static int RawNumLines(LineBuffer* buffer, int width) {
                     toX:(int*)x
                     toY:(int*)y
 {
+    if (position == [self lastPos]) {
+        *y = [self numLinesWithWidth:width] - 1;
+        ScreenCharArray *lastLine = [self wrappedLineAtIndex:*y width:width];
+        *x = lastLine.length;
+        if (*x == 0 && *y > 0) {
+            *y = *y - 1;
+            lastLine = [self wrappedLineAtIndex:*y width:width];
+            *x = lastLine.length;
+        } else if (*x < 0) {
+            return NO;
+        }
+        return YES;
+    }
     int i;
     int yoffset = 0;
     for (i = 0; position >= 0 && i < [blocks count]; ++i) {
@@ -1654,15 +1719,16 @@ static int RawNumLines(LineBuffer* buffer, int width) {
             // pos = offset within block
             // offset = additional offset the user requested
             // but we need to see if the position actually exists after adding offset. If it can be
-            // converted to an x,y position the it's all right.
-            const BOOL positionIsValid = [self convertPosition:*position + pos + offset
+            // converted to an x,y position then it's all right.
+            int candidatePosition = *position + pos + offset;
+            const BOOL positionIsValid = [self convertPosition:candidatePosition
                                                      withWidth:width
                                                            toX:&tempx
                                                            toY:&tempy];
             if (positionIsValid &&
                 tempy >= 0 &&
                 tempx >= 0) {
-                *position += pos + offset;
+                *position = candidatePosition;
                 return YES;
             } else {
                 return NO;
@@ -1703,7 +1769,7 @@ static int RawNumLines(LineBuffer* buffer, int width) {
     return position;
 }
 
-- (long long)absPositionOfFindContext:(FindContext)findContext
+- (long long)absPositionOfFindContext:(FindContext *)findContext
 {
     long long offset = droppedChars + findContext.offset;
     int numBlocks = findContext.absBlockNum - num_dropped_blocks;
@@ -1761,9 +1827,9 @@ static int RawNumLines(LineBuffer* buffer, int width) {
 - (void)storeLocationOfAbsPos:(long long)absPos
                     inContext:(FindContext *)context
 {
-    context->absBlockNum = [self absBlockNumberOfAbsPos:absPos];
-    long long absOffset = [self absPositionOfAbsBlock:context->absBlockNum];
-    context->offset = MAX(0, absPos - absOffset);
+    context.absBlockNum = [self absBlockNumberOfAbsPos:absPos];
+    long long absOffset = [self absPositionOfAbsBlock:context.absBlockNum];
+    context.offset = MAX(0, absPos - absOffset);
 }
 
 - (LineBuffer *)newAppendOnlyCopy {

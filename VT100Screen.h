@@ -1,312 +1,160 @@
-// -*- mode:objc -*-
-// $Id: VT100Screen.h,v 1.38 2008-09-30 06:21:12 yfabian Exp $
-/*
- **  VT100Screen.h
- **
- **  Copyright (c) 2002, 2003
- **
- **  Author: Fabian, Ujwal S. Setlur
- **         Initial code by Kiichi Kusama
- **
- **  Project: iTerm
- **
- **  Description: Implements the VT100 screen.
- **
- **  This program is free software; you can redistribute it and/or modify
- **  it under the terms of the GNU General Public License as published by
- **  the Free Software Foundation; either version 2 of the License, or
- **  (at your option) any later version.
- **
- **  This program is distributed in the hope that it will be useful,
- **  but WITHOUT ANY WARRANTY; without even the implied warranty of
- **  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- **  GNU General Public License for more details.
- **
- **  You should have received a copy of the GNU General Public License
- **  along with this program; if not, write to the Free Software
- **  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- */
-
 #import <Cocoa/Cocoa.h>
+#import "PTYTextViewDataSource.h"
+#import "VT100ScreenDelegate.h"
 #import "VT100Terminal.h"
-#import "LineBuffer.h"
-#import "DVR.h"
-#import "PTYTextView.h"
 
+@class DVR;
+@class iTermGrowlDelegate;
+@class LineBuffer;
+@class PTYTask;
+@class VT100Grid;
+@class VT100Terminal;
+
+// Dictionary keys for -highlightTextMatchingRegex:
 extern NSString * const kHighlightForegroundColor;
 extern NSString * const kHighlightBackgroundColor;
-extern BOOL gExperimentalOptimization;
+extern int kVT100ScreenMinColumns;
+extern int kVT100ScreenMinRows;
 
-@class PTYTask;
-@class PTYSession;
-@class iTermGrowlDelegate;
-
-// For debugging: log the buffer.
-void DumpBuf(screen_char_t* p, int n);
-
-// Convert a string into screen_char_t. This deals with padding out double-
-// width characters, joining combining marks, and skipping zero-width spaces.
-//
-// The buffer size must be at least twice the length of the string (worst case:
-//   every character is double-width).
-// Pass prototype foreground and background colors in fg and bg.
-// *len is filled in with the number of elements of *buf that were set.
-// encoding is currently ignored and it's assumed to be UTF-16.
-// A good choice for ambiguousIsDoubleWidth is [SESSION doubleWidth].
-// If not null, *cursorIndex gives an index into s and is changed into the
-//   corresponding index into buf.
-void StringToScreenChars(NSString *s,
-                         screen_char_t *buf,
-                         screen_char_t fg,
-                         screen_char_t bg,
-                         int *len,
-                         BOOL ambiguousIsDoubleWidth,
-                         int* cursorIndex);
-void TranslateCharacterSet(screen_char_t *s, int len);
-
-@interface VT100Screen : NSObject <PTYTextViewDataSource>
+@interface VT100Screen : NSObject <PTYTextViewDataSource, VT100TerminalDelegate>
 {
-    int WIDTH; // width of screen
-    int HEIGHT; // height of screen
-    int cursorX;
-    int cursorY;
-    int SAVE_CURSOR_X;
-    int SAVE_CURSOR_Y;
-    int ALT_SAVE_CURSOR_X;
-    int ALT_SAVE_CURSOR_Y;
-    int SCROLL_TOP;
-    int SCROLL_BOTTOM;
-    int SCROLL_LEFT;
-    int SCROLL_RIGHT;
-    NSMutableSet* tabStops;
+    NSMutableSet* tabStops_;
+    VT100Terminal *terminal_;
+    id<VT100ScreenDelegate> delegate_;  // PTYSession implements this
 
-    VT100Terminal *TERMINAL;
-    PTYTask *SHELL;
-    PTYSession *SESSION;
-    int charset[4], saveCharset[4];
-    BOOL blinkShow;
-    BOOL PLAYBELL;
-    BOOL SHOWBELL;
-    BOOL FLASHBELL;
-    BOOL GROWL;
+    // Saved cursor position.
+    VT100GridCoord savedCursor_;
 
-    // DECLRMM/DECVSSM(VT class 4 feature).
-    // If this mode is enabled, the application can set 
-    // SCROLL_LEFT/SCROLL_RIGHT margins.
-    BOOL vsplitMode;
-
-    BOOL blinkingCursor;
-    PTYTextView *display;
-
-    // A circular buffer exactly (WIDTH+1) * HEIGHT elements in size. This contains
-    // only the contents of the screen. The scrollback buffer is stored in linebuffer.
-    screen_char_t *buffer_lines;
-
-    // The position in buffer_lines of the first line in the screen. The logical lines
-    // wrap around the circular buffer.
-    screen_char_t *screen_top;
-
-    // buffer holding flags for each char on whether it needs to be redrawn
-    char *dirty;
-    // Number of bytes in the dirty array.
-    int dirtySize;
-
-    // a single default line
-    screen_char_t *defaultLine_;
-    screen_char_t *result_line;
-
-    // temporary buffers to store main/alt screens in SAVE_BUFFER/RESET_BUFFER mode
-    screen_char_t *saved_primary_buffer;
-    screen_char_t *saved_alt_buffer;
-    screen_char_t primary_default_char;
-    BOOL showingAltScreen;
-
-    // default line stuff
-    screen_char_t default_bg_code;
-    screen_char_t default_fg_code;
-    int default_line_width;
-
+    // BOOLs indicating, for each of the characters sets, which ones are in line-drawing mode.
+    NSMutableArray *charsetUsesLineDrawingMode_;
+    NSMutableArray *savedCharsetUsesLineDrawingMode_;
+    BOOL audibleBell_;
+    BOOL showBellIndicator_;
+    BOOL flashBell_;
+    BOOL postGrowlNotifications_;
+    BOOL cursorBlinks_;
+    VT100Grid *primaryGrid_;
+    VT100Grid *altGrid_;  // may be nil
+    VT100Grid *currentGrid_;  // Weak reference. Points to either primaryGrid or altGrid.
+    
     // Max size of scrollback buffer
-    unsigned int  max_scrollback_lines;
-    // This flag overrides max_scrollback_lines:
+    unsigned int maxScrollbackLines_;
+    // This flag overrides maxScrollbackLines_:
     BOOL unlimitedScrollback_;
 
-    // how many scrollback lines have been lost due to overflow
-    int scrollback_overflow;
-    long long cumulative_scrollback_overflow;
+    // How many scrollback lines have been lost due to overflow. Periodically reset with
+    // -resetScrollbackOverflow.
+    int scrollbackOverflow_;
 
-    // print to ansi...
-    BOOL printToAnsi;        // YES=ON, NO=OFF, default=NO;
-    NSMutableString *printToAnsiString;
+    // A rarely reset count of the number of lines lost to scrollback overflow. Adding this to a
+    // line number gives a unique line number that won't be reused when the linebuffer overflows.
+    long long cumulativeScrollbackOverflow_;
 
-    // Growl stuff
-    iTermGrowlDelegate* gd;
+    // When set, strings, newlines, and linefeeds are appened to printBuffer_. When ANSICSI_PRINT
+    // with code 4 is received, it's sent for printing.
+    BOOL collectInputForPrinting_;
+    NSMutableString *printBuffer_;
 
     // Scrollback buffer
-    LineBuffer* linebuffer;
-    FindContext findContext;
+    LineBuffer* linebuffer_;
+
+    // Current find context.
+    FindContext *findContext_;
+
+    // Where we left off searching.
     long long savedFindContextAbsPos_;
 
     // Used for recording instant replay.
-    DVR* dvr;
+    DVR* dvr_;
     BOOL saveToScrollbackInAlternateScreen_;
 
+    // OK to report window title?
     BOOL allowTitleReporting_;
-	BOOL allDirty_;  // When true, all cells are dirty. Faster than a big memset.
 }
 
+@property(nonatomic, retain) VT100Terminal *terminal;
+@property(nonatomic, assign) BOOL audibleBell;
+@property(nonatomic, assign) BOOL showBellIndicator;
+@property(nonatomic, assign) BOOL flashBell;
+@property(nonatomic, assign) id<VT100ScreenDelegate> delegate;
+@property(nonatomic, assign) BOOL postGrowlNotifications;
+@property(nonatomic, assign) BOOL cursorBlinks;
+@property(nonatomic, assign) BOOL allowTitleReporting;
+@property(nonatomic, assign) unsigned int maxScrollbackLines;
+@property(nonatomic, assign) BOOL unlimitedScrollback;
+@property(nonatomic, assign) BOOL useColumnScrollRegion;
+@property(nonatomic, assign) BOOL saveToScrollbackInAlternateScreen;
+@property(nonatomic, retain) DVR *dvr;
+@property(nonatomic, readonly) VT100GridCoord savedCursor;
 
-- (id)init;
-- (void)dealloc;
+// Designated initializer.
+- (id)initWithTerminal:(VT100Terminal *)terminal;
 
-- (NSString *)description;
+// Destructively sets the screen size.
+- (void)destructivelySetScreenWidth:(int)width height:(int)height;
 
-- (screen_char_t*)initScreenWithWidth:(int)width Height:(int)height;
+// Resize the screen, preserving its contents, alt-grid's contents, and selection.
 - (void)resizeWidth:(int)new_width height:(int)height;
-- (void)reset;
-- (void)resetPreservingPrompt:(BOOL)preservePrompt;
-- (void)resetCharset;
-- (BOOL)usingDefaultCharset;
-- (void)setWidth:(int)width height:(int)height;
-- (void)setScrollback:(unsigned int)lines;
-- (void)setUnlimitedScrollback:(BOOL)enable;
-- (void)setTerminal:(VT100Terminal *)terminal;
-- (void)setShellTask:(PTYTask *)shell;
-- (void)setSession:(PTYSession *)session;
-- (BOOL)vsplitMode;
-- (void)setVsplitMode:(BOOL)mode;
 
-- (PTYTextView *) display;
-- (void) setDisplay: (PTYTextView *) aDisplay;
+// Convert a run to one without nulls on either end.
+- (VT100GridRun)runByTrimmingNullsFromRun:(VT100GridRun)run;
 
-- (BOOL) blinkingCursor;
-- (void) setBlinkingCursor: (BOOL) flag;
-- (void)processXtermPaste64: (NSString*) commandString;
+// Indicates if line drawing mode is enabled for any character set, or if the current character set
+// is not G0.
+- (BOOL)allCharacterSetPropertiesHaveDefaultValues;
+
 - (void)showCursor:(BOOL)show;
-- (void)setPlayBellFlag:(BOOL)flag;
-- (void)setShowBellFlag:(BOOL)flag;
-- (void)setFlashBellFlag:(BOOL)flag;
-- (void)setGrowlFlag:(BOOL)flag;
-- (void)setSaveToScrollbackInAlternateScreen:(BOOL)flag;
-- (BOOL)growl;
 
-// line access
-
-- (NSString *)getLineString:(screen_char_t *)theLine;
-
-// edit screen buffer
-- (void)putToken:(VT100TCC)token;
+// Preserves the prompt, but erases screen and scrollback buffer.
 - (void)clearBuffer;
+
+// Clears the scrollback buffer, leaving screen contents alone.
 - (void)clearScrollbackBuffer;
-- (void)savePrimaryBuffer;
-- (void)showPrimaryBuffer;
-- (void)saveAltBuffer;
-- (void)showAltBuffer;
 
-- (void)setSendModifiers:(int *)modifiers
-               numValues:(int)numValues;
+// Append a string to the screen at the current cursor position. The terminal's insert and wrap-
+// around modes are respected, the cursor is advanced, the screen may be scrolled, and the line
+// buffer may change.
+- (void)appendStringAtCursor:(NSString *)s ascii:(BOOL)ascii;
 
-- (void)mouseModeDidChange:(MouseMode)mouseMode;
+// This is a hacky thing that moves the cursor to the next line, not respecting scroll regions.
+// It's used for the tmux status screen.
+- (void)crlf;
 
-// internal
-- (void)setString:(NSString *)s ascii:(BOOL)ascii;
-- (void)setStringToX:(int)x
-                   Y:(int)y
-              string:(NSString *)string
-               ascii:(BOOL)ascii;
-- (void)addLineToScrollback;
-- (void)crlf; // -crlf is called only by tmux integration, so it ignores vsplit mode.
-- (void)setNewLine;
-- (void)deleteCharacters:(int)n;
-- (void)backSpace;
-- (void)backTab;
-- (void)setTab;
-- (void)clearTabStop;
-- (BOOL)haveTabStopAt:(int)x;
-- (void)setTabStopAt:(int)x;
-- (void)removeTabStopAt:(int)x;
-- (void)clearScreen;
-- (void)eraseInDisplay:(VT100TCC)token;
-- (void)eraseInLine:(VT100TCC)token;
-- (void)selectGraphicRendition:(VT100TCC)token;
-- (void)cursorLeft:(int)n;
-- (void)cursorRight:(int)n;
-- (void)cursorUp:(int)n;
-- (void)cursorDown:(int)n;
-- (void)cursorToX:(int)x;
-- (void)cursorToY:(int)y;
-- (void)cursorToX:(int)x Y:(int)y;
-- (void)carriageReturn;
-- (void)saveCursorPosition;
-- (void)restoreCursorPosition;
-- (void)setTopBottom:(VT100TCC)token;
-- (void)scrollUp;
-- (void)scrollDown;
-- (void)activateBell;
-- (void)deviceReport:(VT100TCC)token withQuestion:(BOOL)question;
-- (void)deviceAttribute:(VT100TCC)token;
-- (void)secondaryDeviceAttribute:(VT100TCC)token;
-- (void)insertBlank:(int)n;
-- (void)insertLines:(int)n;
-- (void)deleteLines:(int)n;
-- (void)blink;
+// Move the cursor down one position, scrolling if needed. Scroll regions are respected.
+- (void)linefeed;
 
+// Sets the primary grid's contents and scrollback history. |history| is an array of NSData
+// containing screen_char_t's. It contains a bizarre workaround for tmux bugs.
 - (void)setHistory:(NSArray *)history;
+
+// Sets the alt grid's contents. |lines| is NSData with screen_char_t's.
 - (void)setAltScreen:(NSArray *)lines;
+
+// Load state from tmux. The |state| dictionary has keys from the kStateDictXxx values.
 - (void)setTmuxState:(NSDictionary *)state;
-
-- (void)scrollScreenIntoScrollbackBuffer:(int)leaving;
-
-// Set a range of bytes to dirty=1
-- (void)setRangeDirty:(NSRange)range;
-
-// Set the char at x,y dirty.
-- (void)setCharDirtyAtX:(int)x Y:(int)y;
-
-// set a rectangular region dirty
-- (void)setRectDirtyFromX:(int)fromX Y:(int)fromY toX:(int)toX Y:(int)toY;
-
-// Check if any flag is set at an x,y coordinate in the dirty array
-- (BOOL)isDirtyAtX:(int)x Y:(int)y;
-
-- (void)resetDirty;
-- (void)setDirty;
-
-// print to ansi...
-- (BOOL) printToAnsi;
-- (void) setPrintToAnsi: (BOOL) aFlag;
-- (void) printStringToAnsi: (NSString *) aString;
-
-// UI stuff
-- (void) doPrint;
-
-// Is this character double width on this screen?
-- (BOOL)isDoubleWidthCharacter:(unichar)c;
-
-- (void)dumpDebugLog;
 
 // Set the colors in the prototype char to all text on screen that matches the regex.
 // See kHighlightXxxColor constants at the top of this file for dict keys, values are NSColor*s.
 - (void)highlightTextMatchingRegex:(NSString *)regex
                             colors:(NSDictionary *)colors;
 
-// Turn off DVR for this screen.
-- (void)disableDvr;
-
-// Accessor.
-- (DVR*)dvr;
-
 // Load a frame from a dvr decoder.
 - (void)setFromFrame:(screen_char_t*)s len:(int)len info:(DVRFrameInfo)info;
 
 // Save the position of the end of the scrollback buffer without the screen appeneded.
-- (void)saveTerminalAbsPos;
+- (void)storeLastPositionInLineBufferAsFindContextSavedPosition;
 
-// Restore the saved position into a passed-in find context (see saveFindContextAbsPos and saveTerminalAbsPos).
+// Restore the saved position into a passed-in find context (see saveFindContextAbsPos and
+// storeLastPositionInLineBufferAsFindContextSavedPosition).
 - (void)restoreSavedPositionToFindContext:(FindContext *)context;
 
-// Set whether title reporting is allowed. Defaults to no.
-- (void)setAllowTitleReporting:(BOOL)allow;
+- (NSString *)compactLineDump;
+- (NSString *)compactLineDumpWithHistory;
+- (NSString *)compactLineDumpWithHistoryAndContinuationMarks;
+
+// This is provided for testing only.
+- (VT100Grid *)currentGrid;
+
+- (void)resetCharset;
 
 @end
-

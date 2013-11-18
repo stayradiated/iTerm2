@@ -7,7 +7,6 @@
 
 #import "TmuxHistoryParser.h"
 #import "ScreenChar.h"
-#import "VT100Screen.h"
 #import "VT100Terminal.h"
 
 @implementation TmuxHistoryParser
@@ -30,41 +29,27 @@
     screen_char_t *screenChars;
     NSMutableData *result = [NSMutableData data];
     [terminal putStreamData:[hist dataUsingEncoding:NSUTF8StringEncoding]];
-    VT100TCC token;
-    token = [terminal getNextToken];
-    while (token.type != VT100_WAIT &&
-           token.type != VT100CC_NULL) {
-        if (token.type != VT100_NOTSUPPORT) {
-            int len = 0;
-            switch (token.type) {
-                case VT100_STRING:
-                case VT100_ASCIISTRING:
-                    // Allocate double space in case they're all double-width characters.
-                    screenChars = malloc(sizeof(screen_char_t) * 2 * token.u.string.length);
-                    StringToScreenChars(token.u.string,
-                                        screenChars,
-                                        [terminal foregroundColorCode],
-                                        [terminal backgroundColorCode],
-                                        &len,
-                                        ambiguousIsDoubleWidth,
-                                        NULL);
-                    if (token.type == VT100_ASCIISTRING && [terminal charset]) {
-                        TranslateCharacterSet(screenChars, len);
-                    }
-                    [result appendBytes:screenChars
-                                 length:sizeof(screen_char_t) * len];
-                    free(screenChars);
-                    break;
 
-                case VT100CSI_SGR:
-                    break;
-                case VT100CC_SO:
-                    break;
-                case VT100CC_SI:
-                    break;
+    while ([terminal parseNextToken]) {
+        NSString *string = [terminal lastTokenString];
+        if (string) {
+            // Allocate double space in case they're all double-width characters.
+            screenChars = malloc(sizeof(screen_char_t) * 2 * string.length);
+            int len = 0;
+            StringToScreenChars(string,
+                                screenChars,
+                                [terminal foregroundColorCode],
+                                [terminal backgroundColorCode],
+                                &len,
+                                ambiguousIsDoubleWidth,
+                                NULL);
+            if ([terminal lastTokenWasASCII] && [terminal charset]) {
+                ConvertCharsToGraphicsCharset(screenChars, len);
             }
+            [result appendBytes:screenChars
+                         length:sizeof(screen_char_t) * len];
+            free(screenChars);
         }
-        token = [terminal getNextToken];
     }
 
     return result;

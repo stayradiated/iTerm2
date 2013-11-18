@@ -1384,8 +1384,8 @@ static NSString* FormatRect(NSRect r) {
 {
     NSSize size;
     PTYSession* session = [sessionView session];
-    size.width = MIN_SESSION_COLUMNS * [[session TEXTVIEW] charWidth] + MARGIN * 2;
-    size.height = MIN_SESSION_ROWS * [[session TEXTVIEW] lineHeight] + VMARGIN * 2;
+    size.width = kVT100ScreenMinColumns * [[session TEXTVIEW] charWidth] + MARGIN * 2;
+    size.height = kVT100ScreenMinRows * [[session TEXTVIEW] lineHeight] + VMARGIN * 2;
 
     BOOL hasScrollbar = [parentWindow_ scrollbarShouldBeVisible];
     NSSize scrollViewSize =
@@ -3794,7 +3794,7 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value)
         if ([session newOutput]) {
             // Idle after new output
             if (![session growlIdle] &&
-                [[session SCREEN] growl] &&
+                [[session SCREEN] postGrowlNotifications] &&
                 [[NSDate date] timeIntervalSinceDate:[SessionView lastResizeDate]] > POST_WINDOW_RESIZE_SILENCE_SEC &&
                 now.tv_sec > [session lastOutput].tv_sec + 1) {
                 [[iTermGrowlDelegate sharedInstance] growlNotify:NSLocalizedStringFromTableInBundle(@"Idle",
@@ -3808,7 +3808,9 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value)
                                                                   [[self activeSession] name],
                                                                   [self realObjectCount]]
                                                  andNotification:@"Idle"
-                                                      andSession:session];
+                                                     windowIndex:[session screenWindowIndex]
+                                                        tabIndex:[session screenTabIndex]
+                                                       viewIndex:[session screenViewIndex]];
                 [session setGrowlIdle:YES];
                 [session setGrowlNewOutput:NO];
             }
@@ -3831,7 +3833,7 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value)
 
     if (![[self activeSession] growlNewOutput] &&
         [[self realParentWindow] broadcastMode] == BROADCAST_OFF &&
-        [[[self activeSession] SCREEN] growl] &&
+        [[[self activeSession] SCREEN] postGrowlNotifications] &&
         [[NSDate date] timeIntervalSinceDate:[SessionView lastResizeDate]] > POST_WINDOW_RESIZE_SILENCE_SEC) {
         [[iTermGrowlDelegate sharedInstance] growlNotify:NSLocalizedStringFromTableInBundle(@"New Output",
                                                                                             @"iTerm",
@@ -3841,7 +3843,9 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value)
                                                           [[self activeSession] name],
                                                           [self realObjectCount]]
                                          andNotification:@"New Output"
-                                              andSession:[self activeSession]];
+                                             windowIndex:[[self activeSession] screenWindowIndex]
+                                                tabIndex:[[self activeSession] screenTabIndex]
+                                               viewIndex:[[self activeSession] screenViewIndex]];
         [[self activeSession] setGrowlNewOutput:YES];
     }
 

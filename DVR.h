@@ -28,9 +28,9 @@
  */
 
 #import <Cocoa/Cocoa.h>
-#import <DVRBuffer.h>
-#import <DVRDecoder.h>
-#import <DVREncoder.h>
+#import "DVRBuffer.h"
+#import "DVRDecoder.h"
+#import "DVREncoder.h"
 
 @interface DVR : NSObject
 {
@@ -47,10 +47,10 @@
 - (void)dealloc;
 
 // Save the screen state into the DVR.
-//   buffer: A screen image that DVREncoder understands.
+//   frameLines: An array of screen lines that DVREncoder understands.
 //   length: Number of bytes in buffer.
 //   info: Metadata for the frame.
-- (void)appendFrame:(char*)buffer length:(int)length info:(DVRFrameInfo*)info;
+- (void)appendFrame:(NSArray*)frameLines length:(int)length info:(DVRFrameInfo*)info;
 
 // allocate a new decoder. Use -[releaseDecoder:] when you're done with it.
 - (DVRDecoder*)getDecoder;

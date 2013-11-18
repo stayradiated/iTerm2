@@ -326,6 +326,7 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
     primaryFont = [[PTYFontInfo alloc] init];
     secondaryFont = [[PTYFontInfo alloc] init];
 
+    initialFindContext_ = [[FindContext alloc] init];
     if ([pointer_ viewShouldTrackTouches]) {
         DLog(@"Begin tracking touches in view %@", self);
         [self futureSetAcceptsTouchEvents:YES];
@@ -503,12 +504,13 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
 
     [workingDirectoryAtLines release];
     [trouter release];
-    [initialFindContext_.substring release];
 
     [pointer_ release];
     [cursor_ release];
     [threeFingerTapGestureRecognizer_ disconnectTarget];
     [threeFingerTapGestureRecognizer_ release];
+
+    [initialFindContext_ release];
 
     [super dealloc];
 }
@@ -820,6 +822,9 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
             }
             color = colorTable[theIndex];
             break;
+
+        case ColorModeInvalid:
+            assert(false);
     }
     NSAssert(ok, @"Bogus color mode %d", (int)theMode);
     if (!ok) {
@@ -5023,7 +5028,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     NSMutableAttributedString *theContents;
 
     tempView = [[NSTextView alloc] initWithFrame:[[self enclosingScrollView] documentVisibleRect]];
-    theContents = [[NSMutableAttributedString alloc] initWithString: aString];
+    theContents = [[NSMutableAttributedString alloc] initWithString:aString];
     [theContents addAttributes: [NSDictionary dictionaryWithObjectsAndKeys:
         [NSColor textBackgroundColor], NSBackgroundColorAttributeName,
         [NSColor textColor], NSForegroundColorAttributeName,
@@ -5436,7 +5441,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 
 - (FindContext *)initialFindContext
 {
-    return &initialFindContext_;
+    return initialFindContext_;
 }
 
 // continueFind is called by a timer in the client until it returns NO. It does
@@ -5511,7 +5516,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     } else {
         // Begin a brand new search.
         if (_findInProgress) {
-            [dataSource cancelFindInContext:[dataSource findContext]];
+            [[dataSource findContext] reset];
         }
 
         lastFindStartX = lastFindEndX = 0;
@@ -5520,20 +5525,18 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
         // Search backwards from the end. This is slower than searching
         // forwards, but most searches are reverse searches begun at the end,
         // so it will get a result sooner.
-        [dataSource initFindString:aString
-                  forwardDirection:NO
-                      ignoringCase:ignoreCase
-                             regex:regex
-                       startingAtX:0
-                       startingAtY:[dataSource numberOfLines] + 1 + [dataSource totalScrollbackOverflow]
-                        withOffset:0
-                         inContext:[dataSource findContext]
-                   multipleResults:YES];
+        [dataSource setFindString:aString
+                 forwardDirection:NO
+                     ignoringCase:ignoreCase
+                            regex:regex
+                      startingAtX:0
+                      startingAtY:[dataSource numberOfLines] + 1 + [dataSource totalScrollbackOverflow]
+                       withOffset:0
+                        inContext:[dataSource findContext]
+                  multipleResults:YES];
 
-        [initialFindContext_.substring release];
-        initialFindContext_ = *[dataSource findContext];
+        [initialFindContext_ copyFromFindContext:[dataSource findContext]];  // TODO test this
         initialFindContext_.results = nil;
-        initialFindContext_.substring = [initialFindContext_.substring copy];
         [dataSource saveFindContextAbsPos];
         _findInProgress = YES;
 
@@ -8407,7 +8410,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 
 - (void)logWorkingDirectoryAtLine:(long long)line
 {
-    NSString *workingDirectory = [[dataSource shellTask] getWorkingDirectory];
+    NSString *workingDirectory = [[_delegate SHELL] getWorkingDirectory];
     [self logWorkingDirectoryAtLine:line withDirectory:workingDirectory];
 }
 
@@ -8428,7 +8431,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 
     // Return current directory if not able to log via XTERMCC_WINDOW_TITLE
     if ([workingDirectoryAtLines count] == 0) {
-        return [[dataSource shellTask] getWorkingDirectory];
+        return [[_delegate SHELL] getWorkingDirectory];
     }
 
     long long previousLine = [[[workingDirectoryAtLines lastObject] objectAtIndex:0] longLongValue];
@@ -8705,6 +8708,35 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     [self setDimOnlyText:[[PreferencePanel sharedInstance] dimOnlyText]];
 }
 
+- (NSRect)gridRect {
+    NSRect visibleRect = [self visibleRect];
+    int lineStart = [dataSource numberOfLines] - [dataSource height];
+    int lineEnd = [dataSource numberOfLines];
+    return NSMakeRect(visibleRect.origin.x,
+                      lineStart * lineHeight,
+                      visibleRect.origin.x + visibleRect.size.width,
+                      (lineEnd - lineStart + 1) * lineHeight);
+}
+
+- (void)setNeedsDisplayOnLine:(int)y inRange:(VT100GridRange)range
+{
+    NSRect dirtyRect;
+    const int x = range.location;
+    const int maxX = range.location + range.length - 1;
+    
+    dirtyRect.origin.x = MARGIN + x * charWidth;
+    dirtyRect.origin.y = y * lineHeight;
+    dirtyRect.size.width = (maxX - x + 1) * charWidth;
+    dirtyRect.size.height = lineHeight;
+    
+    // Add a character on either side for glyphs that render unexpectedly wide.
+    dirtyRect.origin.x -= charWidth;
+    dirtyRect.size.width += 2 * charWidth;
+    DLog(@"Line %d is dirty from %d to %d, set rect %@ dirty",
+         y, x, maxX, [NSValue valueWithRect:dirtyRect]);
+    [self setNeedsDisplayInRect:dirtyRect];
+}
+
 // WARNING: Do not call this function directly. Call
 // -[refresh] instead, as it ensures scrollback overflow
 // is dealt with so that this function can dereference
@@ -8759,70 +8791,45 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     int allDirty = [dataSource isAllDirty] ? 1 : 0;
     [dataSource resetAllDirty];
 
-    if (gExperimentalOptimization) {
-      int currentCursorX = [dataSource cursorX] - 1;
-      int currentCursorY = [dataSource cursorY] - 1;
-      if (prevCursorX != currentCursorX ||
-          prevCursorY != currentCursorY) {
-          // Mark previous and current cursor position dirty
-          DLog(@"Mark previous cursor position %d,%d dirty", prevCursorX, prevCursorY);
-          [dataSource setCharDirtyAtCursorX:prevCursorX Y:prevCursorY];
-          DLog(@"Mark current cursor position %d,%d dirty", currentCursorX, currentCursorY);
-          [dataSource setCharDirtyAtCursorX:currentCursorX Y:currentCursorY];
+    int currentCursorX = [dataSource cursorX] - 1;
+    int currentCursorY = [dataSource cursorY] - 1;
+    if (prevCursorX != currentCursorX ||
+        prevCursorY != currentCursorY) {
+        // Mark previous and current cursor position dirty
+        DLog(@"Mark previous cursor position %d,%d dirty", prevCursorX, prevCursorY);
+        int maxX = [dataSource width] - 1;
+        [dataSource setCharDirtyAtCursorX:MIN(maxX, prevCursorX) Y:prevCursorY];
+        DLog(@"Mark current cursor position %d,%d dirty", currentCursorX, currentCursorY);
+        [dataSource setCharDirtyAtCursorX:MIN(maxX, currentCursorX) Y:currentCursorY];
 
-          // Set prevCursor[XY] to new cursor position
-          prevCursorX = currentCursorX;
-          prevCursorY = currentCursorY;
-      }
+        // Set prevCursor[XY] to new cursor position
+        prevCursorX = currentCursorX;
+        prevCursorY = currentCursorY;
     }
-    for (int y = lineStart; y < lineEnd; y++) {
-        for (int x = 0; x < WIDTH; x++) {
-            int dirtyFlags = allDirty || [dataSource isDirtyAtX:x Y:y-lineStart];
-            if (dirtyFlags) {
-                foundDirty = YES;
-                // Remove highlighted search matches on this line.
-                [resultMap_ removeObjectForKey:[NSNumber numberWithLongLong:y + totalScrollbackOverflow]];
 
-                // Compute the dirty rect for this line.
-                NSRect dirtyRect = [self visibleRect];
-                dirtyRect.origin.y = y * lineHeight;
-                dirtyRect.size.height = lineHeight;
-                if (!allDirty) {
-                    dirtyRect.origin.x = MARGIN + x * charWidth;
-                    int maxX;
-                    for (maxX = WIDTH - 1; maxX > x; maxX--) {
-                        if ([dataSource isDirtyAtX:maxX Y:y-lineStart]) {
-                            break;
-                        }
-                    }
-                    dirtyRect.size.width = (maxX - x + 1) * charWidth;
-                    DLog(@"Line %d is dirty from %d to %d, set rect %@ dirty",
-                         y, x, maxX, [NSValue valueWithRect:dirtyRect]);
-                } else {
-                    DLog(@"Mark all of line %d dirty bc allDirty is set", y);
-                }
-                [self setNeedsDisplayInRect:dirtyRect];
-
+    // Remove results from dirty lines and mark parts of the view as needing display.
+    if (allDirty) {
+        foundDirty = YES;
+        for (int y = lineStart; y < lineEnd; y++) {
+            [resultMap_ removeObjectForKey:[NSNumber numberWithLongLong:y + totalScrollbackOverflow]];
+        }
+        NSRect visibleRect = [self visibleRect];
+        [self setNeedsDisplayInRect:[self gridRect]];
 #ifdef DEBUG_DRAWING
-                char temp[WIDTH + 1];
-                screen_char_t* p = [dataSource getLineAtScreenIndex:screenindex];
-                for (int i = 0; i < WIDTH; ++i) {
-                    temp[i] = p[i].complexChar ? '#' : p[i].code;
-                }
-                temp[WIDTH] = 0;
-                [dirtyDebug appendFormat:@"set rect %d,%d %dx%d (line %d=%s) dirty\n",
-                 (int)dirtyRect.origin.x,
-                 (int)dirtyRect.origin.y,
-                 (int)dirtyRect.size.width,
-                 (int)dirtyRect.size.height,
-                 y, temp];
+        NSLog(@"allDirty is set, redraw the whole view");
 #endif
-                break;
+    } else {
+        for (int y = lineStart; y < lineEnd; y++) {
+            VT100GridRange range = [dataSource dirtyRangeForLine:y - lineStart];
+            if (range.length > 0) {
+                foundDirty = YES;
+                [resultMap_ removeObjectForKey:[NSNumber numberWithLongLong:y + totalScrollbackOverflow]];
+                [self setNeedsDisplayOnLine:y inRange:range];
+#ifdef DEBUG_DRAWING
+                NSLog(@"line %d has dirty characters", y);
+#endif
             }
         }
-#ifdef DEBUG_DRAWING
-        ++screenindex;
-#endif
     }
 
     // Always mark the IME as needing to be drawn to keep things simple.
