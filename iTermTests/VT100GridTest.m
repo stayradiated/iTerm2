@@ -191,10 +191,10 @@ do { \
     assert(![grid isCharDirtyAt:coord]);
     assert(![grid isAnyCharDirty]);
 
-    [grid markCharDirty:YES at:coord];
+    [grid markCharDirty:YES at:coord updateTimestamp:NO];
     assert([grid isCharDirtyAt:coord]);
     assert([grid isAnyCharDirty]);
-    [grid markCharDirty:NO at:coord];
+    [grid markCharDirty:NO at:coord updateTimestamp:YES];
 
     assert(![grid isCharDirtyAt:coord]);
     assert(![grid isAnyCharDirty]);
@@ -590,7 +590,7 @@ do { \
 
 - (void)testScrollWholeScreenUpIntoLineBuffer {
     VT100Grid *grid = [self gridFromCompactLines:@"abcd\nefgh\nijkl\nmnop"];
-    [grid markCharDirty:YES at:VT100GridCoordMake(2, 2)];
+    [grid markCharDirty:YES at:VT100GridCoordMake(2, 2) updateTimestamp:YES];
     assert([[grid compactDirtyDump] isEqualToString:@"cccc\ncccc\nccdc\ncccc"]);
     LineBuffer *lineBuffer = [[[LineBuffer alloc] initWithBlockSize:1000] autorelease];
     [lineBuffer setMaxLines:1];
@@ -1384,7 +1384,8 @@ do { \
         [lineBuffer appendLine:[self screenCharLineForString:string]
                         length:string.length
                        partial:i == strings.count - 1
-                         width:80];
+                         width:80
+                     timestamp:0];
         i++;
     }
     va_end(args);
