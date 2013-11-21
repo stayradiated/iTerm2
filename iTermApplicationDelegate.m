@@ -40,6 +40,7 @@
 #import "iTermExpose.h"
 #import "ColorsMenuItemView.h"
 #import "iTermFontPanel.h"
+#import "NSView+RecursiveDescription.h"
 #import "PseudoTerminalRestorer.h"
 #import "ToastWindowController.h"
 #include <unistd.h>
@@ -313,7 +314,10 @@ static BOOL hasBecomeActive = NO;
         [[iTermController sharedInstance] registerHotkey:[ppanel hotkeyCode] modifiers:[ppanel hotkeyModifiers]];
     }
     if ([ppanel isAnyModifierRemapped]) {
-        [[iTermController sharedInstance] beginRemappingModifiers];
+        // Use a brief delay so windows have a chance to open before the dialog is shown.
+        [[iTermController sharedInstance] performSelector:@selector(beginRemappingModifiers)
+                                               withObject:nil
+                                               afterDelay:0.5];
     }
     [self _updateArrangementsMenu:windowArrangements_];
 
@@ -1093,14 +1097,12 @@ static BOOL hasBecomeActive = NO;
 }
 
 // Debug logging
--(IBAction)debugLogging:(id)sender
+- (IBAction)debugLogging:(id)sender
 {
-    ToggleDebugLogging();
+  ToggleDebugLogging();
 }
 
-
-/// About window
-
+// About window
 - (NSAttributedString *)_linkTo:(NSString *)urlString title:(NSString *)title
 {
     NSDictionary *linkAttributes = [NSDictionary dictionaryWithObject:[NSURL URLWithString:urlString]
