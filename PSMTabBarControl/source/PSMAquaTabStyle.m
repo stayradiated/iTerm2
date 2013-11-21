@@ -438,7 +438,12 @@ static CGImageRef CGImageCreateWithNSImage(NSImage *image, CGRect sourceRect) {
         }
 
         [self drawBackgroundImage:bgImage tintedWithColor:tabColor inRect:cellFrame];
+
+        // Draw right border
         [aquaDivider compositeToPoint:NSMakePoint(cellFrame.origin.x + cellFrame.size.width - 1.0, cellFrame.origin.y + cellFrame.size.height) operation:NSCompositeSourceOver];
+
+        // Draw left border
+        [aquaDivider compositeToPoint:NSMakePoint(cellFrame.origin.x - 1.0, cellFrame.origin.y + cellFrame.size.height) operation:NSCompositeSourceOver];
 
         aRect.size.height+=0.5;
 
@@ -462,7 +467,8 @@ static CGImageRef CGImageCreateWithNSImage(NSImage *image, CGRect sourceRect) {
             NSRectFillUsingOperation(aRect, NSCompositeSourceAtop);
         }
 
-        [aquaDivider compositeToPoint:NSMakePoint(cellFrame.origin.x + cellFrame.size.width - 1.0, cellFrame.origin.y + cellFrame.size.height) operation:NSCompositeSourceOver];
+        // Don't draw borders on unselected tabs
+        // [aquaDivider compositeToPoint:NSMakePoint(cellFrame.origin.x + cellFrame.size.width - 1.0, cellFrame.origin.y + cellFrame.size.height) operation:NSCompositeSourceOver];
     }
     [self drawInteriorWithTabCell:cell inView:[cell controlView]];
 }
@@ -490,8 +496,8 @@ static CGImageRef CGImageCreateWithNSImage(NSImage *image, CGRect sourceRect) {
         if ([cell state] == NSOnState) {
             activeCell = cell;
             break;
-        }       
-    }   
+        }
+    }
     [self drawBackgroundInRect:rect color:[activeCell tabColor]];
 
     // no tab view == not connected
