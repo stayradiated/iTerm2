@@ -107,11 +107,7 @@ static const BOOL USE_THIN_SPLITTERS = YES;
     normalStateColor = [NSColor darkGrayColor];
     chosenStateColor = [NSColor whiteColor];
     idleStateColor = [NSColor grayColor];
-<<<<<<< HEAD
     newOutputStateColor = [NSColor brownColor];
-=======
-    newOutputStateColor = [NSColor blueColor];
->>>>>>> 2b7193e17d18768d7fd67ad3a7898d065115ea72
     deadStateColor = [NSColor redColor];
 }
 
