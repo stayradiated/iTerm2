@@ -421,8 +421,9 @@ static CGImageRef CGImageCreateWithNSImage(NSImage *image, CGRect sourceRect) {
         else
             currentTint = [cell controlTint];
 
-        if (![[[cell controlView] window] isKeyWindow])
-            currentTint = NSClearControlTint;
+        // Don't tint the windows
+        //if (![[[cell controlView] window] isKeyWindow])
+        //    currentTint = NSClearControlTint;
 
         switch(currentTint){
             case NSGraphiteControlTint:
