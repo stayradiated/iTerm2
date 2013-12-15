@@ -54,7 +54,7 @@ static const double kCharWidthFractionOffset = 0.35;
 #define BLUE_COEFFICIENT   0.11
 
 #define SWAPINT(a, b) { int temp; temp = a; a = b; b = temp; }
-
+#import "AsyncHostLookupController.h"
 #import "CharacterRun.h"
 #import "CharacterRunInline.h"
 #import "FontSizeEstimator.h"
@@ -81,6 +81,7 @@ static const double kCharWidthFractionOffset = 0.35;
 #import "SearchResult.h"
 #import "SmartSelectionController.h"
 #import "ThreeFingerTapGestureRecognizer.h"
+#import "URLAction.h"
 #import "iTerm.h"
 #import "iTermApplicationDelegate.h"
 #import "iTermController.h"
@@ -104,6 +105,11 @@ static double gSmartCursorBgThreshold = 0.5;
 // background. If the brightness difference is below a threshold then the
 // B/W text mode is triggered. 0 means always trigger, 1 means never trigger.
 static double gSmartCursorFgThreshold = 0.75;
+
+// Notifications posted when hostname lookups finish. Notifications are used to
+// avoid dangling references.
+static NSString *const kHostnameLookupFailed = @"kHostnameLookupFailed";
+static NSString *const kHostnameLookupSucceeded = @"kHostnameLookupSucceeded";
 
 @implementation FindCursorView
 
@@ -190,6 +196,7 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
     long long absStartY;
     int endX;
     long long absEndY;
+    NSDictionary *rule;
 }
 - (NSComparisonResult)compare:(SmartMatch *)aNumber;
 @end
@@ -204,11 +211,14 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
 @end
 
 @interface PTYTextView ()
+// Set the hostname this view is currently waiting for AsyncHostLookupController to finish looking
+// up.
+@property(nonatomic, copy) NSString *currentUnderlineHostname;
+
 - (NSRect)cursorRect;
-- (NSString*)_getURLForX:(int)x
-                       y:(int)y
-  respectingHardNewlines:(BOOL)respectHardNewlines
-    charsTakenFromPrefix:(int*)charsTakenFromPrefixPtr;
+- (URLAction *)urlActionForClickAtX:(int)x
+                                  y:(int)y
+             respectingHardNewlines:(BOOL)respectHardNewlines;
 @end
 
 
@@ -270,7 +280,7 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
             gSmartCursorFgThreshold = d;
         }
     }
-    
+
     [iTermNSKeyBindingEmulator sharedInstance];  // Load and parse DefaultKeyBindings.dict if needed.
 }
 
@@ -338,6 +348,14 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
                                              selector:@selector(flagsChangedNotification:)
                                                  name:@"iTermFlagsChanged"
                                                object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(hostnameLookupFailed:)
+                                                 name:kHostnameLookupFailed
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(hostnameLookupSucceeded:)
+                                                 name:kHostnameLookupSucceeded
+                                               object:nil];
 
     advancedFontRendering = [[PreferencePanel sharedInstance] advancedFontRendering];
     strokeThickness = [[PreferencePanel sharedInstance] strokeThickness];
@@ -373,7 +391,7 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
     }
     [self viewDidChangeBackingProperties];
     markImage_ = [NSImage imageNamed:@"mark"];
-    
+
     return self;
 }
 
@@ -541,6 +559,10 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
     [threeFingerTapGestureRecognizer_ release];
 
     [initialFindContext_ release];
+    if (self.currentUnderlineHostname) {
+        [[AsyncHostLookupController sharedInstance] cancelRequestForHostname:self.currentUnderlineHostname];
+    }
+    [_currentUnderlineHostname release];
 
     [super dealloc];
 }
@@ -1074,11 +1096,13 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
     primaryFont.baselineOffset = baseline;
     primaryFont.boldVersion = [primaryFont computedBoldVersion];
     primaryFont.italicVersion = [primaryFont computedItalicVersion];
+    primaryFont.boldItalicVersion = [primaryFont computedBoldItalicVersion];
 
     secondaryFont.font = naFont;
     secondaryFont.baselineOffset = baseline;
     secondaryFont.boldVersion = [secondaryFont computedBoldVersion];
     secondaryFont.italicVersion = [secondaryFont computedItalicVersion];
+    secondaryFont.boldItalicVersion = [secondaryFont computedBoldItalicVersion];
 
     // Force the secondary font to use the same baseline as the primary font.
     secondaryFont.baselineOffset = primaryFont.baselineOffset;
@@ -2085,14 +2109,14 @@ NSMutableArray* screens=0;
         [fmt setDateFormat:[NSDateFormatter dateFormatFromTemplate:@"EEE hh:mm:ss"
                                                            options:0
                                                             locale:[NSLocale currentLocale]]];
-        
+
     } else {
         // In last 24 hours, just show time
         [fmt setDateFormat:[NSDateFormatter dateFormatFromTemplate:@"hh:mm:ss"
                                                            options:0
                                                             locale:[NSLocale currentLocale]]];
     }
-        
+
     NSString *s = [fmt stringFromDate:timestamp];
 
     NSSize size = [s sizeWithAttributes:@{ NSFontAttributeName: [NSFont systemFontOfSize:10] }];
@@ -2501,13 +2525,14 @@ NSMutableArray* screens=0;
     return joinedLines;
 }
 
-- (BOOL)smartSelectAtX:(int)x
-                     y:(int)y
-              toStartX:(int*)X1
-              toStartY:(int*)Y1
-                toEndX:(int*)X2
-                toEndY:(int*)Y2
-      ignoringNewlines:(BOOL)ignoringNewlines
+- (NSDictionary *)smartSelectAtX:(int)x
+                               y:(int)y
+                        toStartX:(int*)X1
+                        toStartY:(int*)Y1
+                          toEndX:(int*)X2
+                          toEndY:(int*)Y2
+                ignoringNewlines:(BOOL)ignoringNewlines
+                  actionRequired:(BOOL)actionRequred
 {
     NSString* textWindow;
     int targetOffset;
@@ -2533,6 +2558,10 @@ NSMutableArray* screens=0;
     }
     for (int j = 0; j < numRules; j++) {
         NSDictionary *rule = [rulesArray objectAtIndex:j];
+        if (actionRequred && [[SmartSelectionController actionsInRule:rule] count] == 0) {
+            DLog(@"Ignore smart selection rule because it has no action: %@", rule);
+            continue;
+        }
         NSString *regex = [SmartSelectionController regexInRule:rule];
         double precision = [SmartSelectionController precisionInRule:rule];
         if (debug) {
@@ -2560,6 +2589,7 @@ NSMutableArray* screens=0;
                         match->absStartY = startCoord->y + [dataSource totalScrollbackOverflow];
                         match->endX = endCoord->x;
                         match->absEndY = endCoord->y + [dataSource totalScrollbackOverflow];
+                        match->rule = rule;
                         [matches setObject:match forKey:result];
 
                         if (debug) {
@@ -2586,7 +2616,7 @@ NSMutableArray* screens=0;
         *Y1 = bestMatch->absStartY - [dataSource totalScrollbackOverflow];
         *X2 = bestMatch->endX;
         *Y2 = bestMatch->absEndY - [dataSource totalScrollbackOverflow];
-        return YES;
+        return bestMatch->rule;
     } else {
         if (debug) {
             NSLog(@"No matches. Fall back on word selection.");
@@ -2598,7 +2628,7 @@ NSMutableArray* screens=0;
                    startY:Y1
                      endX:X2
                      endY:Y2];
-        return NO;
+        return nil;
     }
 }
 
@@ -2610,7 +2640,8 @@ NSMutableArray* screens=0;
                        toStartY:&startY
                          toEndX:&endX
                          toEndY:&endY
-               ignoringNewlines:ignoringNewlines];
+               ignoringNewlines:ignoringNewlines
+                 actionRequired:NO] != nil;
 }
 
 // Control-pgup and control-pgdown are handled at this level by NSWindow if no
@@ -2698,10 +2729,10 @@ NSMutableArray* screens=0;
     if (keyIsARepeat && ![[dataSource terminal] autorepeatMode]) {
         return;
     }
-    
+
     // Hide the cursor
     [NSCursor setHiddenUntilMouseMoves:YES];
-    
+
     if ([[iTermNSKeyBindingEmulator sharedInstance] handlesEvent:event]) {
         DLog(@"iTermNSKeyBindingEmulator reports that event is handled, sending to interpretKeyEvents.");
         [self interpretKeyEvents:@[ event ]];
@@ -3180,6 +3211,10 @@ NSMutableArray* screens=0;
 - (void)removeUnderline
 {
     _underlineStartX = _underlineStartY = _underlineEndX = _underlineEndY = -1;
+    if (self.currentUnderlineHostname) {
+        [[AsyncHostLookupController sharedInstance] cancelRequestForHostname:self.currentUnderlineHostname];
+    }
+    self.currentUnderlineHostname = nil;
     [self setNeedsDisplay:YES];  // It would be better to just display the underlined/formerly underlined area.
     [self updateTrackingAreas];  // Cause mouseMoved to be (not) called on movement if cmd is down (up).
 }
@@ -3225,8 +3260,7 @@ NSMutableArray* screens=0;
     }
 
     // If it has a slash and is limited to the URL character set, it could be a URL.
-    return ([self _stringLooksLikeURL:aURLString] &&
-            [aURLString rangeOfString:@"/"].length > 0);
+    return [self _stringLooksLikeURL:aURLString];
 }
 
 // Update range of underlined chars indicating cmd-clicakble url.
@@ -3255,25 +3289,40 @@ NSMutableArray* screens=0;
             [self removeUnderline];
             return;
         } else {
-            int charsTakenFromPrefix;
-            NSString *url = [self _getURLForX:x
-                                            y:y
-                                respectingHardNewlines:[self respectHardNewlinesForURLs]
-                                  charsTakenFromPrefix:&charsTakenFromPrefix];
-            if ([url length] > 0 && [self canOpenURL:url onLine:y]) {
-                _underlineStartX = x - charsTakenFromPrefix;
-                _underlineStartY = y;
-                _underlineEndX = x + [url length] - charsTakenFromPrefix - 1;
-                _underlineEndY = y;
+            URLAction *action = [self urlActionForClickAtX:x
+                                                         y:y
+                                    respectingHardNewlines:[self respectHardNewlinesForURLs]];
+            if (action) {
+                _underlineStartX = action.range.start.x;
+                _underlineStartY = action.range.start.y;
+                _underlineEndX = action.range.end.x;
+                _underlineEndY = action.range.end.y;
 
-                int width = [dataSource width];
-                while (_underlineStartX < 0) {
-                    _underlineStartX += width;
-                    _underlineStartY--;
-                }
-                while (_underlineEndX >= width) {
-                    _underlineEndX -= width;
-                    _underlineEndY++;
+                if (action.actionType == kURLActionOpenURL) {
+                    NSURL *url = [NSURL URLWithString:action.string];
+                    if (![url.host isEqualToString:self.currentUnderlineHostname]) {
+                        if (self.currentUnderlineHostname) {
+                            [[AsyncHostLookupController sharedInstance] cancelRequestForHostname:self.currentUnderlineHostname];
+                        }
+                        if (url && url.host) {
+                            self.currentUnderlineHostname = url.host;
+                            [[AsyncHostLookupController sharedInstance] getAddressForHost:url.host
+                                                                               completion:^(BOOL ok, NSString *hostname) {
+                                                                                   if (!ok) {
+                                                                                       [[NSNotificationCenter defaultCenter] postNotificationName:kHostnameLookupFailed
+                                                                                                                                           object:hostname];
+                                                                                   } else {
+                                                                                       [[NSNotificationCenter defaultCenter] postNotificationName:kHostnameLookupSucceeded
+                                                                                                                                           object:hostname];
+                                                                                   }
+                                                                               }];
+                        }
+                    }
+                } else {
+                    if (self.currentUnderlineHostname) {
+                        [[AsyncHostLookupController sharedInstance] cancelRequestForHostname:self.currentUnderlineHostname];
+                    }
+                    self.currentUnderlineHostname = nil;
                 }
             } else {
                 [self removeUnderline];
@@ -4070,10 +4119,8 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
         trouterDragged = YES;
 
         // Drag a file handle (only possible when there is no selection).
-        NSString *path = [self _getURLForX:x y:y charsTakenFromPrefix:nil];
-        path = [trouter getFullPath:path
-                   workingDirectory:[self getWorkingDirectoryAtLine:y]
-                         lineNumber:nil];
+        URLAction *action = [self urlActionForClickAtX:x y:y];
+        NSString *path = action.fullPath;
         if (path == nil) {
             DLog(@"path is nil");
             return;
@@ -4146,13 +4193,10 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 
 - (void)_openTargetWithEvent:(NSEvent *)event inBackground:(BOOL)openInBackground
 {
+    // Command click in place.
     NSPoint clickPoint = [self clickPoint:event];
     int x = clickPoint.x;
     int y = clickPoint.y;
-
-    // Command click in place.
-    NSString *url = [self _getURLForX:x y:y charsTakenFromPrefix:nil];
-
     NSString *prefix = [self wrappedStringAtX:x
                                             y:y
                                           dir:-1
@@ -4161,12 +4205,26 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                                             y:y
                                           dir:1
                           respectHardNewlines:NO];
-    if ([self canOpenURL:url onLine:y]) {
-        [self _openSemanticHistoryForUrl:url
-                                  atLine:y
-                            inBackground:openInBackground
-                                  prefix:prefix
-                                  suffix:suffix];
+
+    URLAction *action = [self urlActionForClickAtX:x y:y];
+    switch (action.actionType) {
+        case kURLActionOpenExistingFile:
+            if (![trouter openPath:action.string
+                  workingDirectory:action.workingDirectory
+                            prefix:prefix
+                            suffix:suffix]) {
+                [self _findUrlInString:action.string andOpenInBackground:openInBackground];
+            }
+            break;
+
+        case kURLActionOpenURL:
+            [self _findUrlInString:action.string andOpenInBackground:openInBackground];
+            break;
+
+        case kURLActionSmartSelectionAction: {
+            [self performSelector:action.selector withObject:action];
+            break;
+        }
     }
 }
 
@@ -4255,7 +4313,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     [self setNeedsDisplay:YES];
     NSMenu *menu = [self menuForEvent:nil];
     openingContextMenu_ = YES;
-    
+
     // Slowly moving away from using NSPoint for integer coordinates.
     validationClickPoint_ = VT100GridCoordMake(clickPoint.x, clickPoint.y);
     [NSMenu popUpContextMenu:menu withEvent:event forView:self];
@@ -4734,7 +4792,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     if (startY >= 0) {
         PTYNoteViewController *note = [[[PTYNoteViewController alloc] init] autorelease];
         [dataSource addNote:note inRange:VT100GridCoordRangeMake(startX, startY, endX, endY)];
-        
+
         // Make sure scrollback overflow is reset.
         [self refresh];
         [note.view removeFromSuperview];
@@ -4815,7 +4873,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 - (IBAction)copyWithStyles:(id)sender
 {
     NSPasteboard *pboard = [NSPasteboard generalPasteboard];
-    
+
     DLog(@"-[PTYTextView copyWithStyles:] called");
     NSString *copyString = [self selectedText];
     NSAttributedString *copyAttributedString = [self selectedAttributedTextWithPad:NO];
@@ -4836,7 +4894,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                                           documentAttributes:nil];
         [pboard setData:RTFData forType:NSRTFPboardType];
     }
-    
+
     [[PasteboardHistory sharedInstance] save:copyString];
 }
 
@@ -4881,10 +4939,11 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 
     int underlineStyle = c.underline ? (NSUnderlineStyleSingle | NSUnderlineByWordMask) : 0;
 
+    BOOL isItalic = c.italic;
     PTYFontInfo *fontInfo = [self getFontForChar:c.code
                                        isComplex:c.complexChar
                                       renderBold:&isBold
-                                    renderItalic:c.italic];
+                                    renderItalic:&isItalic];
 
     return @{ NSForegroundColorAttributeName: fgColor,
               NSBackgroundColorAttributeName: bgColor,
@@ -5063,6 +5122,25 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     return startX > -1 && startY >= 0 && abs(startY - endY) <= 1;
 }
 
+- (SEL)selectorForSmartSelectionAction:(NSDictionary *)action
+{
+    // The selector's name must begin with contextMenuAction to
+    // pass validateMenuItem.
+    switch ([ContextMenuActionPrefsController actionForActionDict:action]) {
+        case kOpenFileContextMenuAction:
+            return @selector(contextMenuActionOpenFile:);
+
+        case kOpenUrlContextMenuAction:
+            return @selector(contextMenuActionOpenURL:);
+
+        case kRunCommandContextMenuAction:
+            return @selector(contextMenuActionRunCommand:);
+
+        case kRunCoprocessContextMenuAction:
+            return @selector(contextMenuActionRunCoprocess:);
+    }
+}
+
 - (BOOL)addCustomActionsToMenu:(NSMenu *)theMenu matchingText:(NSString *)textWindow
 {
     BOOL didAdd = NO;
@@ -5083,30 +5161,11 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                 NSLog(@"Components for %@ are %@", regex, components);
                 NSArray *actions = [SmartSelectionController actionsInRule:rule];
                 for (NSDictionary *action in actions) {
-                    SEL mySelector;
-                    // The selector's name must begin with contextMenuAction to
-                    // pass validateMenuItem.
-                    switch ([ContextMenuActionPrefsController actionForActionDict:action]) {
-                        case kOpenFileContextMenuAction:
-                            mySelector = @selector(contextMenuActionOpenFile:);
-                            break;
-
-                        case kOpenUrlContextMenuAction:
-                            mySelector = @selector(contextMenuActionOpenURL:);
-                            break;
-
-                        case kRunCommandContextMenuAction:
-                            mySelector = @selector(contextMenuActionRunCommand:);
-                            break;
-
-                        case kRunCoprocessContextMenuAction:
-                            mySelector = @selector(contextMenuActionRunCoprocess:);
-                            break;
-                    }
+                    SEL mySelector = [self selectorForSmartSelectionAction:action];
                     NSMenuItem *theItem = [[[NSMenuItem alloc] initWithTitle:[ContextMenuActionPrefsController titleForActionDict:action
                                                                                                             withCaptureComponents:components]
-                                       action:mySelector
-                                keyEquivalent:@""] autorelease];
+                                                                      action:mySelector
+                                                               keyEquivalent:@""] autorelease];
                     [theItem setRepresentedObject:[ContextMenuActionPrefsController parameterForActionDict:action
                                                                                      withCaptureComponents:components]];
                     [theItem setTarget:self];
@@ -5270,7 +5329,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                        action:@selector(addNote:)
                 keyEquivalent:@""];
     [[theMenu itemAtIndex:[theMenu numberOfItems] - 1] setTarget:self];
-    
+
     [theMenu addItemWithTitle:@"Show Note"
                        action:@selector(showNotes:)
                 keyEquivalent:@""];
@@ -6705,43 +6764,42 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 - (PTYFontInfo*)getFontForChar:(UniChar)ch
                      isComplex:(BOOL)complex
                     renderBold:(BOOL*)renderBold
-                  renderItalic:(BOOL)renderItalic
+                  renderItalic:(BOOL*)renderItalic
 {
     BOOL isBold = *renderBold && useBoldFont;
-    BOOL isItalic = renderItalic && useItalicFont;
+    BOOL isItalic = *renderItalic && useItalicFont;
     *renderBold = NO;
+    *renderItalic = NO;
     PTYFontInfo* theFont;
     BOOL usePrimary = !complex && (ch < 128);
 
-    if (usePrimary) {
-        if (isBold) {
-            theFont = primaryFont.boldVersion;
-            if (!theFont) {
-                theFont = primaryFont;
-                *renderBold = YES;
-            }
-        } else if (isItalic) {
-            theFont = primaryFont.italicVersion;
-            if (!theFont) {
-                theFont = primaryFont;
-            }
-        } else {
-            theFont = primaryFont;
+    PTYFontInfo *rootFontInfo = usePrimary ? primaryFont : secondaryFont;
+    theFont = rootFontInfo;
+
+    if (isBold && isItalic) {
+        theFont = rootFontInfo.boldItalicVersion;
+        if (!theFont && rootFontInfo.boldVersion) {
+            theFont = rootFontInfo.boldVersion;
+            *renderItalic = YES;
+        } else if (!theFont && rootFontInfo.italicVersion) {
+            theFont = rootFontInfo.italicVersion;
+            *renderBold = YES;
+        } else if (!theFont) {
+            theFont = rootFontInfo;
+            *renderBold = YES;
+            *renderItalic = YES;
         }
-    } else {
-        if (isBold) {
-            theFont = secondaryFont.boldVersion;
-            if (!theFont) {
-                theFont = secondaryFont;
-                *renderBold = YES;
-            }
-        } else if (isItalic) {
-            theFont = secondaryFont.italicVersion;
-            if (!theFont) {
-                theFont = secondaryFont;
-            }
-        } else {
-            theFont = secondaryFont;
+    } else if (isBold) {
+        theFont = rootFontInfo.boldVersion;
+        if (!theFont) {
+            theFont = rootFontInfo;
+            *renderBold = YES;
+        }
+    } else if (isItalic) {
+        theFont = rootFontInfo.italicVersion;
+        if (!theFont) {
+            theFont = rootFontInfo;
+            *renderItalic = YES;
         }
     }
 
@@ -6972,12 +7030,12 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
         if (_underlineStartX >= 0) {
             if (row == _underlineStartY && row == _underlineEndY) {
                 // Whole underline is on one line; this char is underlined if between start,end X.
-                inUnderlinedRange = (i >= _underlineStartX && i <= _underlineEndX);
+                inUnderlinedRange = (i >= _underlineStartX && i < _underlineEndX);
             } else if (row == _underlineStartY && i >= _underlineStartX) {
                 // Underline spans multiple lines, starting at this one. This char is underlined if
                 // at least at the startX column.
                 inUnderlinedRange = YES;
-            } else if (row == _underlineEndY && i <= _underlineEndX) {
+            } else if (row == _underlineEndY && i < _underlineEndX) {
                 // Underline spans multiple lines, ending at this one. This char is underlined if
                 // before or at the endX column.
                 inUnderlinedRange = YES;
@@ -7116,14 +7174,16 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 
         if (drawable) {
             BOOL fakeBold = theLine[i].bold;
+            BOOL fakeItalic = theLine[i].italic;
             attrs.fontInfo = [self getFontForChar:theLine[i].code
                                         isComplex:theLine[i].complexChar
                                        renderBold:&fakeBold
-                                     renderItalic:theLine[i].italic];
+                                     renderItalic:&fakeItalic];
             attrs.fakeBold = fakeBold;
+            attrs.fakeItalic = fakeItalic;
             attrs.underline = theLine[i].underline || inUnderlinedRange;
-            if (inUnderlinedRange && theLine[i].underline) {
-                attrs.color = [NSColor blueColor];
+            if (inUnderlinedRange && !self.currentUnderlineHostname) {
+                attrs.color = [NSColor colorWithCalibratedRed:0.023 green:0.270 blue:0.678 alpha:1];
             }
             if (!currentRun) {
                 firstRun = currentRun = malloc(sizeof(CRun));
@@ -7139,6 +7199,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                 CRunTerminate(currentRun);
             }
             attrs.fakeBold = NO;
+            attrs.fakeItalic = NO;
             attrs.fontInfo = nil;
         }
 
@@ -7187,9 +7248,14 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     double y = initialPoint.y + lineHeight + currentRun->attrs.fontInfo.baselineOffset;
     int x = initialPoint.x + currentRun->x;
     // Flip vertically and translate to (x, y).
+    NSAffineTransformStruct transformStruct = [[currentRun->attrs.fontInfo.font textTransform] transformStruct];
+    CGFloat m21 = 0.0;
+    if (currentRun->attrs.fakeItalic) {
+        m21 = 0.2;
+    }
     CGContextSetTextMatrix(ctx, CGAffineTransformMake(1.0,  0.0,
-                                                      0.0, -1.0,
-                                                      x,    y));
+                                                      m21, -1.0,
+                                                      x, y));
 
     void *advances = CRunGetAdvances(currentRun);
     CGContextShowGlyphsWithAdvances(ctx, glyphs, advances, length);
@@ -7198,7 +7264,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
         // If anti-aliased, drawing twice at the same position makes the strokes thicker.
         // If not anti-alised, draw one pixel to the right.
         CGContextSetTextMatrix(ctx, CGAffineTransformMake(1.0,  0.0,
-                                                          0.0, -1.0,
+                                                          m21, -1.0,
                                                           x + (currentRun->attrs.antiAlias ? _antiAliasedShift : 1),
                                                           y));
 
@@ -7223,6 +7289,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                          at:(NSPoint)pos
                       width:(CGFloat)width
                    fakeBold:(BOOL)fakeBold
+                 fakeItalic:(BOOL)fakeItalic
                   antiAlias:(BOOL)antiAlias {
     NSDictionary* attrs;
     attrs = [NSDictionary dictionaryWithObjectsAndKeys:
@@ -7245,7 +7312,18 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     CGContextRef cgContext = (CGContextRef) [ctx graphicsPort];
     CGContextSetFillColorWithColor(cgContext, [self cgColorForColor:color]);
     CGContextSetStrokeColorWithColor(cgContext, [self cgColorForColor:color]);
-    CGContextSetTextPosition(cgContext, pos.x, pos.y + fontInfo.baselineOffset + lineHeight);
+    NSAffineTransformStruct transformStruct = [[fontInfo.font textTransform] transformStruct];
+
+    CGFloat m21 = 0.0;
+    if (fakeItalic) {
+        m21 = 0.2;
+    }
+
+    CGAffineTransform textMatrix = CGAffineTransformMake(1.0,  0.0,
+                                                         m21, -1.0,
+                                                         pos.x, pos.y + fontInfo.baselineOffset + lineHeight);
+    CGContextSetTextMatrix(cgContext, textMatrix);
+
     for (CFIndex j = 0; j < CFArrayGetCount(runs); j++) {
         CTRunRef run = CFArrayGetValueAtIndex(runs, j);
         CFRange range;
@@ -7272,6 +7350,18 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
         storage:(CRunStorage *)storage {
     NSPoint startPoint = NSMakePoint(initialPoint.x + currentRun->x, initialPoint.y);
     CGContextSetShouldAntialias(ctx, currentRun->attrs.antiAlias);
+
+    // If there is an underline, save some values before the run gets chopped up.
+    CGFloat runWidth = 0;
+    int length = currentRun->string ? 1 : currentRun->length;
+    NSSize *advances = nil;
+    if (currentRun->attrs.underline) {
+        advances = CRunGetAdvances(currentRun);
+        for (int i = 0; i < length; i++) {
+            runWidth += advances[i].width;
+        }
+    }
+
     if (!currentRun->string) {
         // Non-complex, except for glyphs we can't find.
         while (currentRun->length) {
@@ -7288,6 +7378,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                                    at:NSMakePoint(initialPoint.x + complexRun->x, initialPoint.y)
                                 width:CRunGetAdvances(complexRun)[0].width
                              fakeBold:complexRun->attrs.fakeBold
+                           fakeItalic:complexRun->attrs.fakeItalic
                             antiAlias:complexRun->attrs.antiAlias];
             CRunFree(complexRun);
         }
@@ -7299,18 +7390,13 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                                at:NSMakePoint(initialPoint.x + currentRun->x, initialPoint.y)
                             width:CRunGetAdvances(currentRun)[0].width
                          fakeBold:currentRun->attrs.fakeBold
+                       fakeItalic:currentRun->attrs.fakeItalic
                         antiAlias:currentRun->attrs.antiAlias];
     }
 
     // Draw underline
     if (currentRun->attrs.underline) {
         [currentRun->attrs.color set];
-        CGFloat runWidth = 0;
-        int length = currentRun->string ? 1 : currentRun->length;
-        NSSize *advances = CRunGetAdvances(currentRun);
-        for (int i = 0; i < length; i++) {
-            runWidth += advances[i].width;
-        }
         NSRectFill(NSMakeRect(startPoint.x,
                               startPoint.y + lineHeight - 2,
                               runWidth,
@@ -7742,7 +7828,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
             CGFloat x = range.location * charWidth + MARGIN;
             CGFloat y = line * lineHeight;
             [[NSColor yellowColor] set];
-            
+
             CGFloat maxX = MIN(self.bounds.size.width - MARGIN, range.length * charWidth + x);
             CGFloat w = maxX - x;
             NSRectFill(NSMakeRect(x, y + lineHeight - 1.5, w, 1));
@@ -8565,7 +8651,9 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     if ([s length] == 0) {
         return NO;
     }
-    return YES;
+
+    NSRange slashRange = [s rangeOfString:@"/"];
+    return (slashRange.length > 0 && slashRange.location > 0);  // Must contain a slash, but must not start with it.
 }
 
 // Any sequence of words separated by spaces or tabs could be a filename. Search the neighborhood
@@ -8607,7 +8695,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
             [possiblePath appendString:[afterChunks objectAtIndex:j]];
             if ([trouter getFullPath:possiblePath workingDirectory:workingDirectory lineNumber:NULL]) {
                 if (charsTakenFromPrefixPtr) {
-                    *charsTakenFromPrefixPtr = [beforeChunk length];
+                    *charsTakenFromPrefixPtr = left.length;
                 }
                 return possiblePath;
             }
@@ -8811,25 +8899,38 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     return [haystack substringWithRange:NSMakeRange(start, end - start)];
 }
 
-- (NSString*)_getURLForX:(int)x
-                       y:(int)y
-  respectingHardNewlines:(BOOL)respectHardNewlines
-    charsTakenFromPrefix:(int*)charsTakenFromPrefixPtr
+// Returns the coord gotten by starting at |coord| and advancing |n| steps.
+- (VT100GridCoord)coord:(VT100GridCoord)coord plus:(int)n
+{
+    coord.x += n;
+    int width = [dataSource width];
+    while (coord.x < 0) {
+        coord.y--;
+        coord.x += width;
+    }
+    while (coord.x >= width) {
+        coord.x -= width;
+        coord.y++;
+    }
+    return coord;
+}
+
+// Returns the range of coordinates gotten by starting at |coord|, backing up
+// |backup| steps, and having its terminus |length| cells after that location.
+- (VT100GridCoordRange)coordRangeFromCoord:(VT100GridCoord)coord
+                                       startingCharsBefore:(int)backup
+                                                    length:(int)length
+{
+    VT100GridCoordRange range;
+    range.start = [self coord:coord plus:-backup];
+    range.end = [self coord:coord plus:length - backup];
+    return range;
+}
+
+- (URLAction *)urlActionForClickAtX:(int)x y:(int)y respectingHardNewlines:(BOOL)respectHardNewlines
 {
     NSString *prefix = [self wrappedStringAtX:x y:y dir:-1 respectHardNewlines:respectHardNewlines];
     NSString *suffix = [self wrappedStringAtX:x y:y dir:1 respectHardNewlines:respectHardNewlines];
-    NSString *joined = [prefix stringByAppendingString:suffix];
-    NSString *possibleUrl = [self stringInString:joined
-                                 includingOffset:[prefix length]
-                                fromCharacterSet:[PTYTextView urlCharacterSet]
-                            charsTakenFromPrefix:charsTakenFromPrefixPtr];
-    NSArray *punctuation = [NSArray arrayWithObjects:@".", @",", @";", nil];
-    for (NSString *pchar in punctuation) {
-        if ([possibleUrl hasSuffix:pchar]) {
-            possibleUrl = [possibleUrl substringToIndex:possibleUrl.length - 1];
-            break;
-        }
-    }
     NSString *possibleFilePart1 = [self stringInString:prefix
                                        includingOffset:[prefix length] - 1
                                       fromCharacterSet:[PTYTextView filenameCharacterSet]
@@ -8840,38 +8941,118 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                                    charsTakenFromPrefix:NULL];
 
     int fileCharsTaken = 0;
+
+    NSString *workingDirectory = [self getWorkingDirectoryAtLine:y];
+    // First, try to locate an existing filename at this location.
     NSString *filename = [self _bruteforcePathFromBeforeString:[[possibleFilePart1 mutableCopy] autorelease]
                                                    afterString:[[possibleFilePart2 mutableCopy] autorelease]
-                                              workingDirectory:[self getWorkingDirectoryAtLine:y]
+                                              workingDirectory:workingDirectory
                                           charsTakenFromPrefix:&fileCharsTaken];
-    if (!filename && [self _stringLooksLikeURL:possibleUrl]) {
-        return possibleUrl;
-    } else if (filename) {
-        if (charsTakenFromPrefixPtr) {
-            *charsTakenFromPrefixPtr = fileCharsTaken;
-        }
-        return filename;
+
+    // Don't consider / to be a valid filename because it's useless and single/double slashes are
+    // pretty common.
+    if (filename && ![[filename stringByReplacingOccurrencesOfString:@"//" withString:@"/"] isEqualToString:@"/"]) {
+        // If you clicked on an existing filename, use it.
+        URLAction *action = [URLAction urlActionToOpenExistingFile:filename];
+        action.range = [self coordRangeFromCoord:VT100GridCoordMake(x, y)
+                             startingCharsBefore:fileCharsTaken
+                                          length:filename.length];
+        action.fullPath = [trouter getFullPath:filename
+                              workingDirectory:workingDirectory
+                                    lineNumber:NULL];
+        action.workingDirectory = workingDirectory;
+        return action;
+    }
+
+    // Next, see if smart selection matches anything with an action.
+    int tx1, ty1, tx2, ty2;
+    NSDictionary *rule = [self smartSelectAtX:x
+                                            y:y
+                                     toStartX:&tx1
+                                     toStartY:&ty1
+                                       toEndX:&tx2
+                                       toEndY:&ty2
+                             ignoringNewlines:NO
+                               actionRequired:YES];
+    NSArray *actions = [SmartSelectionController actionsInRule:rule];
+    if (actions.count) {
+        NSString *content = [self contentFromX:tx1
+                                             Y:ty1
+                                           ToX:tx2
+                                             Y:ty2
+                                           pad:NO
+                            includeLastNewline:NO
+                        trimTrailingWhitespace:NO];
+        URLAction *action = [URLAction urlActionToPerformSmartSelectionRule:rule onString:content];
+        action.range = VT100GridCoordRangeMake(tx1, ty1, tx2, ty2);
+        NSError *regexError;
+        NSArray *components = [content captureComponentsMatchedByRegex:[SmartSelectionController regexInRule:rule]
+                                                               options:0
+                                                                 range:NSMakeRange(0, content.length)
+                                                                 error:&regexError];
+        action.selector = [self selectorForSmartSelectionAction:actions[0]];
+        action.representedObject = [ContextMenuActionPrefsController parameterForActionDict:actions[0]
+                                                                      withCaptureComponents:components];
+        return action;
+    }
+
+    // No luck. Look for something vaguely URL-like.
+    int prefixChars;
+    NSString *joined = [prefix stringByAppendingString:suffix];
+    NSString *possibleUrl = [self stringInString:joined
+                                 includingOffset:[prefix length]
+                                fromCharacterSet:[PTYTextView urlCharacterSet]
+                            charsTakenFromPrefix:&prefixChars];
+    NSString *originalMatch = possibleUrl;
+    int offset, length;
+    possibleUrl = [self urlInString:possibleUrl offset:&offset length:&length];
+    if (!possibleUrl) {
+        return nil;
+    }
+    // If possibleUrl contains a :, make sure something can handle that scheme.
+    BOOL ruledOutBasedOnScheme = NO;
+    if ([possibleUrl rangeOfString:@":"].length > 0) {
+        NSURL *url = [NSURL URLWithString:possibleUrl];
+        ruledOutBasedOnScheme = (!url || [[NSWorkspace sharedWorkspace] URLForApplicationToOpenURL:url] == nil);
+    }
+
+    if ([self _stringLooksLikeURL:[originalMatch substringWithRange:NSMakeRange(offset, length)]] &&
+         !ruledOutBasedOnScheme) {
+        URLAction *action = [URLAction urlActionToOpenURL:possibleUrl];
+        action.range = [self coordRangeFromCoord:VT100GridCoordMake(x, y)
+                             startingCharsBefore:prefixChars - offset
+                                          length:length];
+        return action;
     } else {
-        if (charsTakenFromPrefixPtr) {
-            *charsTakenFromPrefixPtr = 0;
-        }
-        return @"";
+        return nil;
     }
 }
 
-- (NSString *)_getURLForX:(int)x
-                        y:(int)y
-     charsTakenFromPrefix:(int *)charsTakenFromPrefixPtr
+- (void)hostnameLookupFailed:(NSNotification *)notification {
+    if ([[notification object] isEqualToString:self.currentUnderlineHostname]) {
+        self.currentUnderlineHostname = nil;
+        _underlineStartX = _underlineStartY = _underlineEndX = _underlineEndY = -1;
+        [self setNeedsDisplay:YES];
+    }
+}
+
+- (void)hostnameLookupSucceeded:(NSNotification *)notification {
+    if ([[notification object] isEqualToString:self.currentUnderlineHostname]) {
+        self.currentUnderlineHostname = nil;
+        [self setNeedsDisplay:YES];
+    }
+}
+
+- (URLAction *)urlActionForClickAtX:(int)x y:(int)y
 {
     // I tried respecting hard newlines if that is a legal URL, but that's such a broad definition
     // that it doesn't work well. Hard EOLs mid-url are very common. Let's try always ignoring them.
-    return [self _getURLForX:x
-                           y:y
-               respectingHardNewlines:[self respectHardNewlinesForURLs]
-               charsTakenFromPrefix:charsTakenFromPrefixPtr];
+    return [self urlActionForClickAtX:x
+                                    y:y
+               respectingHardNewlines:[self respectHardNewlinesForURLs]];
 }
 
-- (BOOL) _findMatchingParenthesis: (NSString *) parenthesis withX:(int)X Y:(int)Y
+- (BOOL)_findMatchingParenthesis:(NSString *)parenthesis withX:(int)X Y:(int)Y
 {
     unichar matchingParenthesis, sameParenthesis;
     NSString* theChar;
@@ -9125,54 +9306,88 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 //    "(http://example.com/foo?query#fragment)." -> http://example.com/foo?query#fragment
 // 5. Strings without a scheme (http is assumed, previous cases do not apply)
 //    "example.com/foo?query#fragment" -> http://example.com/foo?query#fragment
-// If iTerm2 is the handler for the scheme, then the bookmark is launched directly.
-// Otherwise it's passed to the OS to launch.
-- (void)_findUrlInString:(NSString *)aURLString andOpenInBackground:(BOOL)background
+// *offset will be set to the number of characters at the start of aURLString that were skipped past.
+// offset may be nil. If |length| is not nil, then *length will be set to the number of chars matched
+// in |aURLString|.
+- (NSString *)urlInString:(NSString *)aURLString offset:(int *)offset length:(int *)length
 {
     NSURL *url;
     NSString* trimmedURLString;
 
     trimmedURLString = [aURLString stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 
-    // length returns an unsigned value, so couldn't this just be ==? [TRE]
-    if ([trimmedURLString length] <= 0) {
-        return;
+    if (![trimmedURLString length]) {
+        return nil;
     }
-
-    // Check for common types of URLs
+    if (offset) {
+        *offset = 0;
+    }
 
     NSRange range = [trimmedURLString rangeOfString:@":"];
     if (range.location == NSNotFound) {
+        if (length) {
+            *length = trimmedURLString.length;
+        }
         trimmedURLString = [NSString stringWithFormat:@"http://%@", trimmedURLString];
     } else {
+        if (length) {
+            *length = trimmedURLString.length;
+        }
         // Search backwards for the start of the scheme.
         for (int i = range.location - 1; 0 <= i; i--) {
             unichar c = [trimmedURLString characterAtIndex:i];
             if (!isalnum(c)) {
                 // Remove garbage before the scheme part
                 trimmedURLString = [trimmedURLString substringFromIndex:i + 1];
-                switch (c) {
-                case '(':
+                if (offset) {
+                    *offset = i + 1;
+                }
+                if (length) {
+                    *length = trimmedURLString.length;
+                }
+                if (c == '(') {
                     // If an open parenthesis is right before the
                     // scheme part, remove the closing parenthesis
-                    {
-                        NSRange closer = [trimmedURLString rangeOfString:@")"];
-                        if (closer.location != NSNotFound) {
-                            trimmedURLString = [trimmedURLString substringToIndex:closer.location];
+                    NSRange closer = [trimmedURLString rangeOfString:@")"];
+                    if (closer.location != NSNotFound) {
+                        trimmedURLString = [trimmedURLString substringToIndex:closer.location];
+                        if (length) {
+                            *length = trimmedURLString.length;
                         }
                     }
-                    break;
-                }
-                // Chomp a dot at the end
-                int last = [trimmedURLString length] - 1;
-                if (0 <= last && [trimmedURLString characterAtIndex:last] == '.') {
-                    trimmedURLString = [trimmedURLString substringToIndex:last];
                 }
                 break;
             }
         }
     }
 
+    // Remove trailing punctuation.
+    NSArray *punctuation = @[ @".", @",", @";", @":", @"!" ];
+    BOOL found;
+    do {
+        found = NO;
+        for (NSString *pchar in punctuation) {
+            if ([trimmedURLString hasSuffix:pchar]) {
+                trimmedURLString = [trimmedURLString substringToIndex:trimmedURLString.length - 1];
+                found = YES;
+                if (length) {
+                    (*length)--;
+                }
+            }
+        }
+    } while (found);
+
+    return trimmedURLString;
+}
+
+// If iTerm2 is the handler for the scheme, then the bookmark is launched directly.
+// Otherwise it's passed to the OS to launch.
+- (void)_findUrlInString:(NSString *)aURLString andOpenInBackground:(BOOL)background
+{
+    NSString *trimmedURLString = [self urlInString:aURLString offset:NULL length:NULL];
+    if (!trimmedURLString) {
+        return;
+    }
     NSString* escapedString =
         (NSString *)CFURLCreateStringByAddingPercentEscapes(NULL,
                                                             (CFStringRef)trimmedURLString,
@@ -9180,7 +9395,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                                                             NULL,
                                                             kCFStringEncodingUTF8);
 
-    url = [NSURL URLWithString:escapedString];
+    NSURL *url = [NSURL URLWithString:escapedString];
     [escapedString release];
 
     Profile *bm = [[PreferencePanel sharedInstance] handlerBookmarkForURL:[url scheme]];
@@ -9349,12 +9564,12 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     NSRect dirtyRect;
     const int x = range.location;
     const int maxX = range.location + range.length - 1;
-    
+
     dirtyRect.origin.x = MARGIN + x * charWidth;
     dirtyRect.origin.y = y * lineHeight;
     dirtyRect.size.width = (maxX - x + 1) * charWidth;
     dirtyRect.size.height = lineHeight;
-    
+
     if (showTimestamps_) {
         dirtyRect.size.width = self.visibleRect.size.width - dirtyRect.origin.x;
     }
@@ -9564,7 +9779,8 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                             toStartY:&tmpY1
                               toEndX:&tmpX2
                               toEndY:&tmpY2
-                    ignoringNewlines:NO];
+                    ignoringNewlines:NO
+                      actionRequired:NO];
             }
 
             // Now the complicated bit...
@@ -9599,7 +9815,8 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                                     toStartY:&ty1
                                       toEndX:&tx2
                                       toEndY:&ty2
-                            ignoringNewlines:NO];
+                            ignoringNewlines:NO
+                              actionRequired:NO];
                     }
                     startX = tx1;
                     startY = ty1;
@@ -9632,7 +9849,8 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                                     toStartY:&ty1
                                       toEndX:&tx2
                                       toEndY:&ty2
-                            ignoringNewlines:NO];
+                            ignoringNewlines:NO
+                              actionRequired:NO];
                     }
                     startX = tx2;
                     startY = ty2;
