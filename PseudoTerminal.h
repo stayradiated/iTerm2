@@ -287,6 +287,10 @@ NSWindowDelegate,
                windowType:(int)windowType
                    screen:(int)screenNumber
                  isHotkey:(BOOL)isHotkey;
+- (void)finishInitializationWithSmartLayout:(BOOL)smartLayout
+                                 windowType:(int)windowType
+                                     screen:(int)screenNumber
+                                   isHotkey:(BOOL)isHotkey;
 
 - (PseudoTerminal *)terminalDraggedFromAnotherWindowAtPoint:(NSPoint)point;
 
@@ -794,6 +798,8 @@ NSWindowDelegate,
 - (IBAction)showHideNotes:(id)sender;
 - (IBAction)nextMarkOrNote:(id)sender;
 - (IBAction)previousMarkOrNote:(id)sender;
+- (IBAction)toggleAlertOnNextMark:(id)sender;
+
 @end
 
 @interface PseudoTerminal (KeyValueCoding)
