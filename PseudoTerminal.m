@@ -189,9 +189,7 @@ NSString *sessionsKey = @"sessions";
 - (void)hideFullScreenTabControl;
 - (NSRect)maxFrame;
 - (void)_drawFullScreenBlackBackground;
-- (void)copySettingsFrom:(PseudoTerminal*)other;
 - (void)insertTab:(PTYTab*)aTab atIndex:(int)anIndex;
-- (void)fitTabsToWindow;
 - (BOOL)_haveBottomBorder;
 - (BOOL)_haveTopBorder;
 - (float)maxCharHeight:(int*)numChars;
@@ -502,10 +500,10 @@ NSString *sessionsKey = @"sessions";
     [[[self window] contentView] addSubview:bottomBar];
 
     // assign tabview and delegates
-    [tabBarControl setTabView: TABVIEW];
+    [tabBarControl setTabView:TABVIEW];
     [TABVIEW setDelegate:tabBarControl];
-    [tabBarControl setDelegate: self];
-    [tabBarControl setHideForSingleTab: NO];
+    [tabBarControl setDelegate:self];
+    [tabBarControl setHideForSingleTab:NO];
 
     // set the style of tabs to match window style
     [self setTabBarStyle];
@@ -1832,7 +1830,7 @@ NSString *sessionsKey = @"sessions";
 
     // update the cursor
     if ([[[self currentSession] TEXTVIEW] refresh]) {
-        [[self currentSession] scheduleUpdateIn:kBlinkTimerIntervalSec];
+        [[self currentSession] scheduleUpdateIn:[[PreferencePanel sharedInstance] timeBetweenBlinks]];
     }
     [[[self currentSession] TEXTVIEW] setNeedsDisplay:YES];
     [self _loadFindStringFromSharedPasteboard];
@@ -3193,7 +3191,7 @@ NSString *sessionsKey = @"sessions";
 - (void)tabView:(NSTabView*)aTabView didDropTabViewItem:(NSTabViewItem *)tabViewItem inTabBar:(PSMTabBarControl *)aTabBarControl
 {
     PTYTab *aTab = [tabViewItem identifier];
-    PseudoTerminal *term = [aTabBarControl delegate];
+    PseudoTerminal *term = (PseudoTerminal *)[aTabBarControl delegate];
 
     if ([term numberOfTabs] == 1) {
         [term fitWindowToTabs];
@@ -5634,7 +5632,7 @@ NSString *sessionsKey = @"sessions";
           __FILE__, __LINE__, item );
 #endif
 
-    if ([item action] == @selector(detachTmux) ||
+    if ([item action] == @selector(detachTmux:) ||
         [item action] == @selector(newTmuxWindow:) ||
         [item action] == @selector(newTmuxTab:) ||
         [item action] == @selector(openDashboard:)) {
@@ -5679,13 +5677,13 @@ NSString *sessionsKey = @"sessions";
                [item action] == @selector(selectPaneLeft:) ||
                [item action] == @selector(selectPaneRight:)) {
         result = ([[[self currentTab] sessions] count] > 1);
-    } else if ([item action] == @selector(closecurrentsession:)) {
+    } else if ([item action] == @selector(closeCurrentSession:)) {
         NSWindowController* controller = [[NSApp keyWindow] windowController];
         if (controller) {
             // Any object whose window controller implements this selector is closed by
             // cmd-w: pseudoterminal (closes a pane), preferences, bookmarks
             // window. Notably, not expose, various modal windows, etc.
-            result = [controller respondsToSelector:@selector(closecurrentsession:)];
+            result = [controller respondsToSelector:@selector(closeCurrentSession:)];
         } else {
             result = NO;
         }

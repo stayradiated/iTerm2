@@ -2456,9 +2456,11 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
     panel = [NSSavePanel savePanel];
     // Session could end before panel is dismissed.
     [[self retain] autorelease];
-    sts = [panel runModalForDirectory:NSHomeDirectory() file:@""];
+    panel.directoryURL = [NSURL fileURLWithPath:NSHomeDirectory()];
+    panel.nameFieldStringValue = @"";
+    sts = [panel runModal];
     if (sts == NSOKButton) {
-        BOOL logsts = [SHELL loggingStartWithPath:[panel filename]];
+        BOOL logsts = [SHELL loggingStartWithPath:panel.URL.path];
         if (logsts == NO) {
             NSBeep();
         }
@@ -2671,7 +2673,7 @@ static long long timeInTenthsOfSeconds(struct timeval t)
 
     if (anotherUpdateNeeded) {
         if ([[[self tab] parentWindow] currentTab] == [self tab]) {
-            [self scheduleUpdateIn:kBlinkTimerIntervalSec];
+            [self scheduleUpdateIn:[[PreferencePanel sharedInstance] timeBetweenBlinks]];
         } else {
             [self scheduleUpdateIn:kBackgroundSessionIntervalSec];
         }
@@ -2689,7 +2691,7 @@ static long long timeInTenthsOfSeconds(struct timeval t)
 - (void)refreshAndStartTimerIfNeeded
 {
     if ([TEXTVIEW refresh]) {
-        [self scheduleUpdateIn:kBlinkTimerIntervalSec];
+        [self scheduleUpdateIn:[[PreferencePanel sharedInstance] timeBetweenBlinks]];
     }
 }
 
@@ -2906,7 +2908,10 @@ static long long timeInTenthsOfSeconds(struct timeval t)
 {
     Profile* bookmark = [self addressBookEntry];
     NSString* guid = [bookmark objectForKey:KEY_GUID];
-    if (isDivorced) {
+    if (isDivorced && [[ProfileModel sessionsInstance] bookmarkWithGuid:guid]) {
+        // Once, I saw a case where an already-divorced bookmark's guid was missing from
+        // sessionsInstance. I don't know why, but if that's the case, just create it there
+        // again. :(
         return guid;
     }
     isDivorced = YES;

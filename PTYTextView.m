@@ -82,6 +82,7 @@ static const double kCharWidthFractionOffset = 0.35;
 #import "SmartSelectionController.h"
 #import "ThreeFingerTapGestureRecognizer.h"
 #import "URLAction.h"
+#import "charmaps.h"
 #import "iTerm.h"
 #import "iTermApplicationDelegate.h"
 #import "iTermController.h"
@@ -285,7 +286,7 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
             gSmartCursorFgThreshold = d;
         }
     }
-
+    
     [iTermNSKeyBindingEmulator sharedInstance];  // Load and parse DefaultKeyBindings.dict if needed.
 }
 
@@ -302,7 +303,9 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
 }
 
 - (BOOL)useThreeFingerTapGestureRecognizer {
-    return [[NSUserDefaults standardUserDefaults] boolForKey:@"ThreeFingerTapEmulatesThreeFingerClick"];
+    // This used to be guarded by [[NSUserDefaults standardUserDefaults] boolForKey:@"ThreeFingerTapEmulatesThreeFingerClick"];
+    // but I'm going to turn it on by default and see if anyone complains. 12/16/13
+    return YES;
 }
 
 - (void)viewDidChangeBackingProperties {
@@ -361,7 +364,7 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
                                              selector:@selector(hostnameLookupSucceeded:)
                                                  name:kHostnameLookupSucceeded
                                                object:nil];
-
+    
     advancedFontRendering = [[PreferencePanel sharedInstance] advancedFontRendering];
     strokeThickness = [[PreferencePanel sharedInstance] strokeThickness];
     imeOffset = 0;
@@ -396,7 +399,7 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
     }
     [self viewDidChangeBackingProperties];
     markImage_ = [NSImage imageNamed:@"mark"];
-
+    
     return self;
 }
 
@@ -1102,7 +1105,7 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
     primaryFont.boldVersion = [primaryFont computedBoldVersion];
     primaryFont.italicVersion = [primaryFont computedItalicVersion];
     primaryFont.boldItalicVersion = [primaryFont computedBoldItalicVersion];
-
+    
     secondaryFont.font = naFont;
     secondaryFont.baselineOffset = baseline;
     secondaryFont.boldVersion = [secondaryFont computedBoldVersion];
@@ -2122,14 +2125,14 @@ NSMutableArray* screens=0;
         [fmt setDateFormat:[NSDateFormatter dateFormatFromTemplate:@"EEE hh:mm:ss"
                                                            options:0
                                                             locale:[NSLocale currentLocale]]];
-
+        
     } else {
         // In last 24 hours, just show time
         [fmt setDateFormat:[NSDateFormatter dateFormatFromTemplate:@"hh:mm:ss"
                                                            options:0
                                                             locale:[NSLocale currentLocale]]];
     }
-
+        
     NSString *s = [fmt stringFromDate:timestamp];
 
     NSSize size = [s sizeWithAttributes:@{ NSFontAttributeName: [NSFont systemFontOfSize:10] }];
@@ -2453,7 +2456,7 @@ NSMutableArray* screens=0;
         // The user might have used the scroll wheel to cause blinking text to become
         // visible. Make sure the timer is running if anything onscreen is
         // blinking.
-        [[dataSource session] scheduleUpdateIn:kBlinkTimerIntervalSec];
+        [[dataSource session] scheduleUpdateIn:[[PreferencePanel sharedInstance] timeBetweenBlinks]];
     }
     [selectedFont_ release];
     selectedFont_ = nil;
@@ -2742,10 +2745,10 @@ NSMutableArray* screens=0;
     if (keyIsARepeat && ![[dataSource terminal] autorepeatMode]) {
         return;
     }
-
+    
     // Hide the cursor
     [NSCursor setHiddenUntilMouseMoves:YES];
-
+    
     if ([[iTermNSKeyBindingEmulator sharedInstance] handlesEvent:event]) {
         DLog(@"iTermNSKeyBindingEmulator reports that event is handled, sending to interpretKeyEvents.");
         [self interpretKeyEvents:@[ event ]];
@@ -3279,11 +3282,6 @@ NSMutableArray* screens=0;
 // Update range of underlined chars indicating cmd-clicakble url.
 - (void)updateUnderlinedURLs:(NSEvent *)event
 {
-    if ([self reportingMouseClicks] && !([event modifierFlags] & NSAlternateKeyMask)) {
-        // Mouse reporting takes precendence over URL opening.
-        [self removeUnderline];
-        return;
-    }
     if ([event modifierFlags] & NSCommandKeyMask) {
         NSPoint screenPoint = [NSEvent mouseLocation];
         NSRect windowRect = [[self window] convertRectFromScreen:NSMakeRect(screenPoint.x,
@@ -3310,7 +3308,7 @@ NSMutableArray* screens=0;
                 _underlineStartY = action.range.start.y;
                 _underlineEndX = action.range.end.x;
                 _underlineEndY = action.range.end.y;
-
+                
                 if (action.actionType == kURLActionOpenURL) {
                     NSURL *url = [NSURL URLWithString:action.string];
                     if (![url.host isEqualToString:self.currentUnderlineHostname]) {
@@ -3835,6 +3833,16 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     NSPoint locationInWindow = [event locationInWindow];
     NSPoint locationInTextView = [self convertPoint: locationInWindow fromView: nil];
 
+    BOOL haveReverseSelection = (startY > endY ||
+                                 (startY == endY && startX > endX));
+    BOOL isUnshiftedSingleClick = ([event clickCount] < 2 &&
+                                   !mouseDragged &&
+                                   !([event modifierFlags] & NSShiftKeyMask));
+    BOOL willFollowLink = (!haveReverseSelection &&
+                           isUnshiftedSingleClick &&
+                           cmdPressed &&
+                           [[PreferencePanel sharedInstance] cmdSelection]);
+
     // Send mouse up event to host if xterm mouse reporting is on
     if (frontTextView == self &&
         [self xtermMouseReporting] &&
@@ -3864,8 +3872,19 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                                             withModifiers:[event modifierFlags]
                                                       atX:rx
                                                         Y:ry]];
+                if (willFollowLink) {
+                    // This is a special case. Cmd-click is treated like alt-click at the protocol
+                    // level (because we use alt to disable mouse reporting, unfortunately). Few
+                    // apps interpret alt-clicks specially, and we really want to handle cmd-click
+                    // on links even when mouse reporting is on. Link following has to be done on
+                    // mouse up to allow the user to drag links and to cancel accidental clicks (by
+                    // doing mouseUp far away from mouseDown). So we report the cmd-click as an
+                    // alt-click and then open the link. Note that cmd-alt-click isn't handled here
+                    // because you won't get here if alt is pressed. Note that openTargetWithEvent:
+                    // may not do anything if the pointer isn't over a clickable string.
+                    [self openTargetWithEvent:event];
+                }
                 return;
-                break;
 
             case MOUSE_REPORTING_NONE:
             case MOUSE_REPORTING_HILITE:
@@ -3888,17 +3907,14 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     // make sure we have key focus
     [[self window] makeFirstResponder:self];
 
-    if (startY > endY ||
-        (startY == endY && startX > endX)) {
+    if (haveReverseSelection) {
         // Make sure the start is before the end.
         DLog(@"swap selection start and end");
         int t;
         t = startY; startY = endY; endY = t;
         t = startX; startX = endX; endX = t;
         [self setSelectionTime];
-    } else if ([event clickCount] < 2 &&
-               !mouseDragged &&
-               !([event modifierFlags] & NSShiftKeyMask)) {
+    } else if (isUnshiftedSingleClick) {
         // Just a click in the window.
         DLog(@"is a click in the window");
 
@@ -3923,8 +3939,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
         }
 
         startX=-1;
-        if (cmdPressed &&
-            [[PreferencePanel sharedInstance] cmdSelection]) {
+        if (willFollowLink) {
             if (altPressed) {
                 [self openTargetInBackgroundWithEvent:event];
             } else {
@@ -4220,23 +4235,25 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                           respectHardNewlines:NO];
 
     URLAction *action = [self urlActionForClickAtX:x y:y];
-    switch (action.actionType) {
-        case kURLActionOpenExistingFile:
-            if (![trouter openPath:action.string
-                  workingDirectory:action.workingDirectory
-                            prefix:prefix
-                            suffix:suffix]) {
+    if (action) {
+        switch (action.actionType) {
+            case kURLActionOpenExistingFile:
+                if (![trouter openPath:action.string
+                      workingDirectory:action.workingDirectory
+                                prefix:prefix
+                                suffix:suffix]) {
+                    [self _findUrlInString:action.string andOpenInBackground:openInBackground];
+                }
+                break;
+                
+            case kURLActionOpenURL:
                 [self _findUrlInString:action.string andOpenInBackground:openInBackground];
+                break;
+                
+            case kURLActionSmartSelectionAction: {
+                [self performSelector:action.selector withObject:action];
+                break;
             }
-            break;
-
-        case kURLActionOpenURL:
-            [self _findUrlInString:action.string andOpenInBackground:openInBackground];
-            break;
-
-        case kURLActionSmartSelectionAction: {
-            [self performSelector:action.selector withObject:action];
-            break;
         }
     }
 }
@@ -4326,7 +4343,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     [self setNeedsDisplay:YES];
     NSMenu *menu = [self menuForEvent:nil];
     openingContextMenu_ = YES;
-
+    
     // Slowly moving away from using NSPoint for integer coordinates.
     validationClickPoint_ = VT100GridCoordMake(clickPoint.x, clickPoint.y);
     [NSMenu popUpContextMenu:menu withEvent:event forView:self];
@@ -4805,7 +4822,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     if (startY >= 0) {
         PTYNoteViewController *note = [[[PTYNoteViewController alloc] init] autorelease];
         [dataSource addNote:note inRange:VT100GridCoordRangeMake(startX, startY, endX, endY)];
-
+        
         // Make sure scrollback overflow is reset.
         [self refresh];
         [note.view removeFromSuperview];
@@ -4886,7 +4903,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 - (IBAction)copyWithStyles:(id)sender
 {
     NSPasteboard *pboard = [NSPasteboard generalPasteboard];
-
+    
     DLog(@"-[PTYTextView copyWithStyles:] called");
     NSString *copyString = [self selectedText];
     NSAttributedString *copyAttributedString = [self selectedAttributedTextWithPad:NO];
@@ -4907,7 +4924,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                                           documentAttributes:nil];
         [pboard setData:RTFData forType:NSRTFPboardType];
     }
-
+    
     [[PasteboardHistory sharedInstance] save:copyString];
 }
 
@@ -5134,7 +5151,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 {
     return startX > -1 && startY >= 0 && abs(startY - endY) <= 1;
 }
-
+                                 
 - (SEL)selectorForSmartSelectionAction:(NSDictionary *)action
 {
     // The selector's name must begin with contextMenuAction to
@@ -5248,9 +5265,9 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
         BOOL addedItem = NO;
         NSString *text = [self selectedText];
         if ([text intValue]) {
-            [theMenu addItemWithTitle:[NSString stringWithFormat:@"%d = 0x%x", [text intValue], [text intValue]]
-                               action:@selector(bogusSelector)
-                        keyEquivalent:@""];
+            NSMenuItem *theItem = [[[NSMenuItem alloc] init] autorelease];
+            theItem.title = [NSString stringWithFormat:@"%d = 0x%x", [text intValue], [text intValue]];
+            [theMenu addItem:theItem];
             addedItem = YES;
         } else if ([text hasPrefix:@"0x"] && [text length] <= 10) {
             NSScanner *scanner = [NSScanner scannerWithString:text];
@@ -5259,14 +5276,14 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
             unsigned result;
             if ([scanner scanHexInt:&result]) {
                 if ((int)result >= 0) {
-                    [theMenu addItemWithTitle:[NSString stringWithFormat:@"0x%x = %d", result, result]
-                                       action:@selector(bogusSelector)
-                                keyEquivalent:@""];
+                    NSMenuItem *theItem = [[[NSMenuItem alloc] init] autorelease];
+                    theItem.title = [NSString stringWithFormat:@"0x%x = %d", result, result];
+                    [theMenu addItem:theItem];
                     addedItem = YES;
                 } else {
-                    [theMenu addItemWithTitle:[NSString stringWithFormat:@"0x%x = %d or %u", result, result, result]
-                                       action:@selector(bogusSelector)
-                                keyEquivalent:@""];
+                    NSMenuItem *theItem = [[[NSMenuItem alloc] init] autorelease];
+                    theItem.title = [NSString stringWithFormat:@"0x%x = %d or %u", result, result, result];
+                    [theMenu addItem:theItem];
                     addedItem = YES;
                 }
             }
@@ -5342,7 +5359,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                        action:@selector(addNote:)
                 keyEquivalent:@""];
     [[theMenu itemAtIndex:[theMenu numberOfItems] - 1] setTarget:self];
-
+    
     [theMenu addItemWithTitle:@"Show Note"
                        action:@selector(showNotes:)
                 keyEquivalent:@""];
@@ -5578,7 +5595,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     // initialize a save panel
     aSavePanel = [NSSavePanel savePanel];
     [aSavePanel setAccessoryView:nil];
-    [aSavePanel setRequiredFileType:@""];
+
     NSString *path = @"";
     NSArray *searchPaths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
                                                                NSUserDomainMask,
@@ -5591,8 +5608,8 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                                                            timeZone:nil
                                                              locale:[[NSUserDefaults standardUserDefaults] dictionaryRepresentation]];
 
-    if ([aSavePanel runModalForDirectory:path file:nowStr] == NSFileHandlingPanelOKButton) {
-        if (![aData writeToFile:[aSavePanel filename] atomically:YES]) {
+    if ([aSavePanel legacyRunModalForDirectory:path file:nowStr] == NSFileHandlingPanelOKButton) {
+        if (![aData writeToFile:[aSavePanel legacyFilename] atomically:YES]) {
             NSBeep();
         }
     }
@@ -7203,7 +7220,12 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                 CRunInitialize(currentRun, &attrs, storage, curX);
             }
             if (thisCharString) {
-                currentRun = CRunAppendString(currentRun, &attrs, thisCharString, thisCharAdvance, curX);
+                currentRun = CRunAppendString(currentRun,
+                                              &attrs,
+                                              thisCharString,
+                                              theLine[i].code,
+                                              thisCharAdvance,
+                                              curX);
             } else {
                 currentRun = CRunAppend(currentRun, &attrs, thisCharUnichar, thisCharAdvance, curX);
             }
@@ -7261,7 +7283,6 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     double y = initialPoint.y + lineHeight + currentRun->attrs.fontInfo.baselineOffset;
     int x = initialPoint.x + currentRun->x;
     // Flip vertically and translate to (x, y).
-    NSAffineTransformStruct transformStruct = [[currentRun->attrs.fontInfo.font textTransform] transformStruct];
     CGFloat m21 = 0.0;
     if (currentRun->attrs.fakeItalic) {
         m21 = 0.2;
@@ -7296,20 +7317,111 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     return (CGColorRef)[(id)CGColorCreate(colorSpace, components) autorelease];
 }
 
-- (void)_advancedDrawString:(NSString *)str
-                   fontInfo:(PTYFontInfo*)fontInfo
-                      color:(NSColor*)color
-                         at:(NSPoint)pos
-                      width:(CGFloat)width
-                   fakeBold:(BOOL)fakeBold
-                 fakeItalic:(BOOL)fakeItalic
-                  antiAlias:(BOOL)antiAlias {
+- (NSBezierPath *)bezierPathForBoxDrawingCode:(int)code {
+    //  0 1 2
+    //  3 4 5
+    //  6 7 8
+    NSArray *points = nil;
+    // The points array is a series of numbers from the above grid giving the
+    // sequence of points to move the pen to.
+    switch (code) {
+        case ITERM_BOX_DRAWINGS_LIGHT_UP_AND_LEFT:  // ┘
+            points = @[ @(3), @(4), @(1) ];
+            break;
+        case ITERM_BOX_DRAWINGS_LIGHT_DOWN_AND_LEFT:  // ┐
+            points = @[ @(3), @(4), @(7) ];
+            break;
+        case ITERM_BOX_DRAWINGS_LIGHT_DOWN_AND_RIGHT:  // ┌
+            points = @[ @(7), @(4), @(5) ];
+            break;
+        case ITERM_BOX_DRAWINGS_LIGHT_UP_AND_RIGHT:  // └
+            points = @[ @(1), @(4), @(5) ];
+            break;
+        case ITERM_BOX_DRAWINGS_LIGHT_VERTICAL_AND_HORIZONTAL:  // ┼
+            points = @[ @(3), @(5), @(4), @(1), @(7) ];
+            break;
+        case ITERM_BOX_DRAWINGS_LIGHT_HORIZONTAL:  // ─
+            points = @[ @(3), @(5) ];
+            break;
+        case ITERM_BOX_DRAWINGS_LIGHT_VERTICAL_AND_RIGHT:  // ├
+            points = @[ @(1), @(4), @(5), @(4), @(7) ];
+            break;
+        case ITERM_BOX_DRAWINGS_LIGHT_VERTICAL_AND_LEFT:  // ┤
+            points = @[ @(1), @(4), @(3), @(4), @(7) ];
+            break;
+        case ITERM_BOX_DRAWINGS_LIGHT_UP_AND_HORIZONTAL:  // ┴
+            points = @[ @(3), @(4), @(1), @(4), @(5) ];
+            break;
+        case ITERM_BOX_DRAWINGS_LIGHT_DOWN_AND_HORIZONTAL:  // ┬
+            points = @[ @(3), @(4), @(7), @(4), @(5) ];
+            break;
+        case ITERM_BOX_DRAWINGS_LIGHT_VERTICAL:  // │
+            points = @[ @(1), @(7) ];
+            break;
+        default:
+            break;
+    }
+    CGFloat xs[] = { 0, charWidth / 2, charWidth };
+    CGFloat ys[] = { 0, lineHeight / 2, lineHeight };
+    NSBezierPath *path = [NSBezierPath bezierPath];
+    BOOL first = YES;
+    for (NSNumber *n in points) {
+        CGFloat x = xs[n.intValue % 3];
+        CGFloat y = ys[n.intValue / 3];
+        NSPoint p = NSMakePoint(x, y);
+        if (first) {
+            [path moveToPoint:p];
+            first = NO;
+        } else {
+            [path lineToPoint:p];
+        }
+    }
+    return path;
+}
+
+- (void)_advancedDrawRun:(CRun *)complexRun at:(NSPoint)pos
+{
+    NSGraphicsContext *ctx = [NSGraphicsContext currentContext];
+    NSColor *color = complexRun->attrs.color;
+
+    switch (complexRun->key) {
+        case ITERM_BOX_DRAWINGS_LIGHT_UP_AND_LEFT:
+        case ITERM_BOX_DRAWINGS_LIGHT_DOWN_AND_LEFT:
+        case ITERM_BOX_DRAWINGS_LIGHT_DOWN_AND_RIGHT:
+        case ITERM_BOX_DRAWINGS_LIGHT_UP_AND_RIGHT:
+        case ITERM_BOX_DRAWINGS_LIGHT_VERTICAL_AND_HORIZONTAL:
+        case ITERM_BOX_DRAWINGS_LIGHT_HORIZONTAL:
+        case ITERM_BOX_DRAWINGS_LIGHT_VERTICAL_AND_RIGHT:
+        case ITERM_BOX_DRAWINGS_LIGHT_VERTICAL_AND_LEFT:
+        case ITERM_BOX_DRAWINGS_LIGHT_UP_AND_HORIZONTAL:
+        case ITERM_BOX_DRAWINGS_LIGHT_DOWN_AND_HORIZONTAL:
+        case ITERM_BOX_DRAWINGS_LIGHT_VERTICAL: {
+            NSBezierPath *path = [self bezierPathForBoxDrawingCode:complexRun->key];
+            [ctx saveGraphicsState];
+            NSAffineTransform *transform = [NSAffineTransform transform];
+            [transform translateXBy:pos.x yBy:pos.y];
+            [transform concat];
+            [color set];
+            [path stroke];
+            [ctx restoreGraphicsState];
+            return;
+        }
+
+        default:
+            break;
+    }
+    NSString *str = complexRun->string;
+    PTYFontInfo *fontInfo = complexRun->attrs.fontInfo;
+    CGFloat width = CRunGetAdvances(complexRun)[0].width;
+    BOOL fakeBold = complexRun->attrs.fakeBold;
+    BOOL fakeItalic = complexRun->attrs.fakeItalic;
+    BOOL antiAlias = complexRun->attrs.antiAlias;
+
     NSDictionary* attrs;
     attrs = [NSDictionary dictionaryWithObjectsAndKeys:
                 fontInfo.font, NSFontAttributeName,
                 color, NSForegroundColorAttributeName,
                 nil];
-    NSGraphicsContext *ctx = [NSGraphicsContext currentContext];
     [ctx saveGraphicsState];
     [ctx setCompositingOperation:NSCompositeSourceOver];
     NSMutableAttributedString* attributedString =
@@ -7325,7 +7437,6 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     CGContextRef cgContext = (CGContextRef) [ctx graphicsPort];
     CGContextSetFillColorWithColor(cgContext, [self cgColorForColor:color]);
     CGContextSetStrokeColorWithColor(cgContext, [self cgColorForColor:color]);
-    NSAffineTransformStruct transformStruct = [[fontInfo.font textTransform] transformStruct];
 
     CGFloat m21 = 0.0;
     if (fakeItalic) {
@@ -7374,7 +7485,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
             runWidth += advances[i].width;
         }
     }
-
+    
     if (!currentRun->string) {
         // Non-complex, except for glyphs we can't find.
         while (currentRun->length) {
@@ -7385,26 +7496,14 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                 break;
             }
             CRun *complexRun = CRunSplit(currentRun, firstComplexGlyph);
-            [self _advancedDrawString:complexRun->string
-                             fontInfo:complexRun->attrs.fontInfo
-                                color:complexRun->attrs.color
-                                   at:NSMakePoint(initialPoint.x + complexRun->x, initialPoint.y)
-                                width:CRunGetAdvances(complexRun)[0].width
-                             fakeBold:complexRun->attrs.fakeBold
-                           fakeItalic:complexRun->attrs.fakeItalic
-                            antiAlias:complexRun->attrs.antiAlias];
+            [self _advancedDrawRun:complexRun
+                                at:NSMakePoint(initialPoint.x + complexRun->x, initialPoint.y)];
             CRunFree(complexRun);
         }
     } else {
         // Complex
-        [self _advancedDrawString:currentRun->string
-                         fontInfo:currentRun->attrs.fontInfo
-                            color:currentRun->attrs.color
-                               at:NSMakePoint(initialPoint.x + currentRun->x, initialPoint.y)
-                            width:CRunGetAdvances(currentRun)[0].width
-                         fakeBold:currentRun->attrs.fakeBold
-                       fakeItalic:currentRun->attrs.fakeItalic
-                        antiAlias:currentRun->attrs.antiAlias];
+        [self _advancedDrawRun:currentRun
+                            at:NSMakePoint(initialPoint.x + currentRun->x, initialPoint.y)];
     }
 
     // Draw underline
@@ -7841,7 +7940,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
             CGFloat x = range.location * charWidth + MARGIN;
             CGFloat y = line * lineHeight;
             [[NSColor yellowColor] set];
-
+            
             CGFloat maxX = MIN(self.bounds.size.width - MARGIN, range.length * charWidth + x);
             CGFloat w = maxX - x;
             NSRectFill(NSMakeRect(x, y + lineHeight - 1.5, w, 1));
@@ -8664,7 +8763,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     if ([s length] == 0) {
         return NO;
     }
-
+    
     NSRange slashRange = [s rangeOfString:@"/"];
     return (slashRange.length > 0 && slashRange.location > 0);  // Must contain a slash, but must not start with it.
 }
@@ -8927,7 +9026,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     }
     return coord;
 }
-
+                                 
 // Returns the range of coordinates gotten by starting at |coord|, backing up
 // |backup| steps, and having its terminus |length| cells after that location.
 - (VT100GridCoordRange)coordRangeFromCoord:(VT100GridCoord)coord
@@ -8939,7 +9038,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     range.end = [self coord:coord plus:length - backup];
     return range;
 }
-
+                                 
 - (URLAction *)urlActionForClickAtX:(int)x y:(int)y respectingHardNewlines:(BOOL)respectHardNewlines
 {
     NSString *prefix = [self wrappedStringAtX:x y:y dir:-1 respectHardNewlines:respectHardNewlines];
@@ -8961,7 +9060,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                                                    afterString:[[possibleFilePart2 mutableCopy] autorelease]
                                               workingDirectory:workingDirectory
                                           charsTakenFromPrefix:&fileCharsTaken];
-
+    
     // Don't consider / to be a valid filename because it's useless and single/double slashes are
     // pretty common.
     if (filename && ![[filename stringByReplacingOccurrencesOfString:@"//" withString:@"/"] isEqualToString:@"/"]) {
@@ -9028,7 +9127,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
         NSURL *url = [NSURL URLWithString:possibleUrl];
         ruledOutBasedOnScheme = (!url || [[NSWorkspace sharedWorkspace] URLForApplicationToOpenURL:url] == nil);
     }
-
+    
     if ([self _stringLooksLikeURL:[originalMatch substringWithRange:NSMakeRange(offset, length)]] &&
          !ruledOutBasedOnScheme) {
         URLAction *action = [URLAction urlActionToOpenURL:possibleUrl];
@@ -9324,18 +9423,17 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 // in |aURLString|.
 - (NSString *)urlInString:(NSString *)aURLString offset:(int *)offset length:(int *)length
 {
-    NSURL *url;
     NSString* trimmedURLString;
-
+    
     trimmedURLString = [aURLString stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-
+    
     if (![trimmedURLString length]) {
         return nil;
     }
     if (offset) {
         *offset = 0;
     }
-
+    
     NSRange range = [trimmedURLString rangeOfString:@":"];
     if (range.location == NSNotFound) {
         if (length) {
@@ -9373,7 +9471,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
             }
         }
     }
-
+    
     // Remove trailing punctuation.
     NSArray *punctuation = @[ @".", @",", @";", @":", @"!" ];
     BOOL found;
@@ -9577,12 +9675,12 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     NSRect dirtyRect;
     const int x = range.location;
     const int maxX = range.location + range.length - 1;
-
+    
     dirtyRect.origin.x = MARGIN + x * charWidth;
     dirtyRect.origin.y = y * lineHeight;
     dirtyRect.size.width = (maxX - x + 1) * charWidth;
     dirtyRect.size.height = lineHeight;
-
+    
     if (showTimestamps_) {
         dirtyRect.size.width = self.visibleRect.size.width - dirtyRect.origin.x;
     }
@@ -9930,9 +10028,9 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     struct timeval now;
     BOOL redrawBlink = NO;
     gettimeofday(&now, NULL);
-    long long nowTenths = now.tv_sec * 10 + now.tv_usec / 100000;
-    long long lastBlinkTenths = lastBlink.tv_sec * 10 + lastBlink.tv_usec / 100000;
-    if (nowTenths >= lastBlinkTenths + 7) {
+    double timeDelta = now.tv_sec - lastBlink.tv_sec;
+    timeDelta += (now.tv_usec - lastBlink.tv_usec) / 1000000.0;
+    if (timeDelta >= [[PreferencePanel sharedInstance] timeBetweenBlinks]) {
         blinkShow = !blinkShow;
         lastBlink = now;
         redrawBlink = YES;
