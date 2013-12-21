@@ -29,5 +29,3 @@ Settings that I use:
     # Window
     [ ] Show border around window
     [x] Hide scrollbar and resize control
-
-

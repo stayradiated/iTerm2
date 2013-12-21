@@ -1,9 +1,3 @@
-/* Bugs found during testing
- - Cmd-I>terminal>put cursor in "scrollback lines", close window. It goes from 100000 to 100.
- - Attach to tmux that's running vimdiff. Open a new tmux tab, grow the window, and close the tab. vimdiff's display is messed up.
- - Save/restore alt screen in tmux is broken. Test that it's restored correctly, and that cursor position is also loaded properly on connecting.
- */
-
 #import "VT100Screen.h"
 
 #import "DebugLogging.h"
@@ -888,7 +882,7 @@ static const double kInterBellQuietPeriod = 0.1;
     currentGrid_.cursorX = xPos;
 
     DebugLog(@"cursorToX");
-    
+
 }
 
 - (void)activateBell
@@ -912,6 +906,8 @@ static const double kInterBellQuietPeriod = 0.1;
     if (flashBell_) {
         [delegate_ screenFlashImage:FlashBell];
     }
+    [delegate_ screenIncrementBadge];
+    [delegate_ screenRequestUserAttention:NO];
 }
 
 - (void)setHistory:(NSArray *)history
@@ -1652,7 +1648,7 @@ static const double kInterBellQuietPeriod = 0.1;
     if (![self terminalPostGrowlNotification:message]) {
         [self activateBell];
     }
-    [NSApp requestUserAttention:NSCriticalRequest];
+    [delegate_ screenRequestUserAttention:YES];
 }
 
 #pragma mark - VT100TerminalDelegate
@@ -2351,6 +2347,7 @@ static const double kInterBellQuietPeriod = 0.1;
 
 - (BOOL)terminalPostGrowlNotification:(NSString *)message {
     if (postGrowlNotifications_) {
+        [delegate_ screenIncrementBadge];
         NSString *description = [NSString stringWithFormat:@"Session %@ #%d: %@",
                                     [delegate_ screenName],
                                     [delegate_ screenNumber],
