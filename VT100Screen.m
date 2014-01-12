@@ -1748,13 +1748,6 @@ static const double kInterBellQuietPeriod = 0.1;
     return VT100GridRangeMake(range.start.y, range.end.y - range.start.y + 1);
 }
 
-- (void)requestUserAttentionWithMessage:(NSString *)message {
-    if (![self terminalPostGrowlNotification:message]) {
-        [self activateBell];
-    }
-    [delegate_ screenRequestUserAttention:YES];
-}
-
 #pragma mark - VT100TerminalDelegate
 
 - (void)terminalAppendString:(NSString *)string isAscii:(BOOL)isAscii
@@ -2738,6 +2731,21 @@ static const double kInterBellQuietPeriod = 0.1;
     [delegate_ screenSetPasteboard:value];
 }
 
+- (void)terminalWillReceiveFileNamed:(NSString *)name ofSize:(int)size {
+    [delegate_ screenWillReceiveFileNamed:name ofSize:size];
+}
+- (void)terminalDidFinishReceivingFile {
+    [delegate_ screenDidFinishReceivingFile];
+}
+
+- (void)terminalDidReceiveBase64FileData:(NSString *)data {
+    [delegate_ screenDidReceiveBase64FileData:data];
+}
+
+- (void)terminalFileReceiptEndedUnexpectedly {
+    [delegate_ screenFileReceiptEndedUnexpectedly];
+}
+
 - (void)terminalCopyBufferToPasteboard {
     [delegate_ screenCopyBufferToPasteboard];
 }
@@ -2803,7 +2811,7 @@ static const double kInterBellQuietPeriod = 0.1;
 }
 
 - (int)terminalCursorX {
-    return [self cursorX];
+    return MIN([self cursorX], [self width]);
 }
 
 - (int)terminalCursorY {
