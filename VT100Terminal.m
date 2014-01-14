@@ -9,6 +9,9 @@
 @implementation VT100Terminal {
     // True if between BeginFile and EndFile codes.
     BOOL receivingFile_;
+    
+    // In FinalTerm command mode (user is at the prompt typing a command).
+    BOOL inCommand_;
 }
 
 @synthesize delegate = delegate_;
@@ -318,7 +321,8 @@ typedef enum {
     XTERMCC_SET_PALETTE,
     XTERMCC_SET_KVP,
     XTERMCC_PASTE64,
-
+    XTERMCC_FINAL_TERM,
+    
     // Some ansi stuff
     ANSICSI_CHA,     // Cursor Horizontal Absolute
     ANSICSI_VPA,     // Vert Position Absolute
@@ -1797,6 +1801,10 @@ static VT100TCC decode_xterm(unsigned char *datap,
             case 52:
                 // base64 copy/paste (OPT_PASTE64)
                 result.type = XTERMCC_PASTE64;
+                break;
+            case 133:
+                // FinalTerm proprietary codes
+                result.type = XTERMCC_FINAL_TERM;
                 break;
             default:
                 result.type = VT100_NOTSUPPORT;
@@ -3333,6 +3341,7 @@ static VT100TCC decode_string(unsigned char *datap,
     result.italic = italic_;
     result.underline = under_;
     result.blink = blink_;
+    result.image = NO;
     return result;
 }
 
@@ -3966,7 +3975,9 @@ static VT100TCC decode_string(unsigned char *datap,
         } else if ([key isEqualToString:@"CopyToClipboard"]) {
             [delegate_ terminalSetPasteboard:value];
         } else if ([key isEqualToString:@"BeginFile"]) {
-            // Takes two args separated by newline. First is filename, second is size in bytes.
+            // Takes 2-5 args separated by newline. First is filename, second is size in bytes.
+            // Arg 3,4 are width,height in cells for an inline image.
+            // Arg 5 is whether to preserve the aspect ratio for an inline image.
             NSArray *parts = [value componentsSeparatedByString:@"\n"];
             NSString *name = nil;
             int size = -1;
@@ -3976,7 +3987,25 @@ static VT100TCC decode_string(unsigned char *datap,
             if (parts.count >= 2) {
                 size = [parts[1] intValue];
             }
-            [delegate_ terminalWillReceiveFileNamed:name ofSize:size];
+            int width = 0, height = 0;
+            if (parts.count >= 4) {
+                // TODO: If a "px" suffix is present, infer number of cells from current text cell size.
+                width = [parts[2] intValue];
+                height = [parts[3] intValue];
+            }
+            BOOL preserveAspectRatio = YES;
+            if (parts.count >= 5) {
+                preserveAspectRatio = [parts[4] boolValue];
+            }
+            if (width > 0 && height > 0) {
+                [delegate_ terminalWillReceiveInlineFileNamed:name
+                                                       ofSize:size
+                                                        width:width
+                                                       height:height
+                                          preserveAspectRatio:preserveAspectRatio];
+            } else {
+                [delegate_ terminalWillReceiveFileNamed:name ofSize:size];
+            }
             receivingFile_ = YES;
         } else if ([key isEqualToString:@"EndFile"]) {
             [delegate_ terminalDidFinishReceivingFile];
@@ -4567,6 +4596,9 @@ static VT100TCC decode_string(unsigned char *datap,
             }
         }
             break;
+        case XTERMCC_FINAL_TERM:
+            [self executeFinalTermToken];
+            break;
         case XTERMCC_ICON_TITLE:
             [delegate_ terminalSetIconTitle:token.u.string];
             break;
@@ -4732,6 +4764,94 @@ static VT100TCC decode_string(unsigned char *datap,
 
         default:
             NSLog(@"Unexpected token type %d", (int)token.type);
+            break;
+    }
+}
+
+- (void)executeFinalTermToken {
+    VT100TCC token = *lastToken_;
+    NSString *value = token.u.string;
+    NSArray *args = [value componentsSeparatedByString:@";"];
+    if (args.count == 0) {
+        return;
+    }
+   
+    NSString *command = args[0];
+    if (command.length != 1) {
+        return;
+    }
+    switch ([command characterAtIndex:0]) {
+        case 'A':
+            // Sequence marking the start of the command prompt (FTCS_PROMPT_START)
+            [delegate_ terminalPromptDidStart];
+            break;
+            
+        case 'B':
+            // Sequence marking the start of the command read from the command prompt
+            // (FTCS_COMMAND_START)
+            if (!inCommand_) {
+                [delegate_ terminalCommandDidStart];
+                inCommand_ = YES;
+            }
+            break;
+            
+        case 'C':
+            // Sequence marking the end of the command read from the command prompt (FTCS_COMMAND_END)
+            if (inCommand_) {
+                [delegate_ terminalCommandDidEnd];
+                inCommand_ = NO;
+            }
+            break;
+            
+        case 'D':
+            // Return code of last command
+            if (args.count >= 2) {
+                int returnCode = [args[1] intValue];
+                [delegate_ terminalReturnCodeOfLastCommandWas:returnCode];
+            }
+
+        case 'E':
+            // Semantic text is starting.
+            // First argument:
+            //    1: file name
+            //    2: directory name
+            //    3: pid
+            if (args.count >= 2) {
+                VT100TerminalSemanticTextType type = [args[1] intValue];
+                if (type >= 1 && type < kVT100TerminalSemanticTextTypeMax) {
+                    [delegate_ terminalSemanticTextDidStartOfType:type];
+                }
+            }
+            break;
+            
+        case 'F':
+            // Semantic text is ending.
+            // First argument is same as 'D'.
+            if (args.count >= 2) {
+                VT100TerminalSemanticTextType type = [args[1] intValue];
+                if (type >= 1 && type < kVT100TerminalSemanticTextTypeMax) {
+                    [delegate_ terminalSemanticTextDidEndOfType:type];
+                }
+            }
+            break;
+            
+        case 'G':
+            // Update progress bar.
+            // First argument: perecentage
+            // Second argument: title
+            if (args.count == 1) {
+                [delegate_ terminalProgressDidFinish];
+            } else {
+                int percent = [args[1] intValue];
+                double fraction = MAX(MIN(1, 100.0 / (double)percent), 0);
+                NSString *label = nil;
+                
+                if (args.count >= 3) {
+                    NSString *label = args[2];
+                }
+                
+                [delegate_ terminalProgressAt:fraction label:label];
+            }
             break;
     }
 }

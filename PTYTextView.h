@@ -112,7 +112,7 @@ typedef enum {
 - (void)textViewBeginDrag;
 - (void)textViewMovePane;
 - (NSStringEncoding)textViewEncoding;
-
+- (NSString *)textViewCurrentWorkingDirectory;
 @end
 
 @interface PTYTextView : NSView <
@@ -410,6 +410,9 @@ typedef enum {
 
 // Show a visual highlight of a mark on the given line number.
 - (void)highlightMarkOnLine:(int)line;
+
+// Characters that divide words.
+- (NSCharacterSet *)wordSeparatorCharacterSet;
 
 @end
 

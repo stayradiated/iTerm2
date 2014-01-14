@@ -15,6 +15,7 @@
 #import "iTermExpose.h"
 #import "iTermGrowlDelegate.h"
 
+#import <apr-1/apr_base64.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -32,7 +33,11 @@ NSString * const kHighlightBackgroundColor = @"kHighlightBackgroundColor";
 // Wait this long between calls to NSBeep().
 static const double kInterBellQuietPeriod = 0.1;
 
-@implementation VT100Screen
+@implementation VT100Screen {
+    unichar inlineFileCode_;
+    NSMutableString *inlineFile_;
+    NSMutableArray *inlineFileCodes_;
+}
 
 @synthesize terminal = terminal_;
 @synthesize audibleBell = audibleBell_;
@@ -80,6 +85,8 @@ static const double kInterBellQuietPeriod = 0.1;
         savedIntervalTree_ = [[IntervalTree alloc] init];
         intervalTree_ = [[IntervalTree alloc] init];
         markCache_ = [[NSMutableSet alloc] init];
+        commandStartX_ = commandStartY_ = -1;
+
     }
     return self;
 }
@@ -97,6 +104,11 @@ static const double kInterBellQuietPeriod = 0.1;
     [findContext_ release];
     [intervalTree_ release];
     [markCache_ release];
+    [inlineFile_ release];
+    for (NSNumber *code in inlineFileCodes_) {
+        ReleaseImage([code intValue]);
+    }
+    [inlineFileCodes_ release];
     [super dealloc];
 }
 
@@ -823,23 +835,20 @@ static const double kInterBellQuietPeriod = 0.1;
                             NULL);
     }
 
-    if (len < 1) {
-        // The string is empty so do nothing.
-        if (dynamicBuffer) {
-            free(dynamicBuffer);
-        }
-        return;
+    if (len >= 1) {
+        [self incrementOverflowBy:[currentGrid_ appendCharsAtCursor:buffer
+                                                             length:len
+                                            scrollingIntoLineBuffer:linebuffer_
+                                                unlimitedScrollback:unlimitedScrollback_
+                                            useScrollbackWithRegion:[self useScrollbackWithRegion]]];
     }
-
-    [self incrementOverflowBy:[currentGrid_ appendCharsAtCursor:buffer
-                                                         length:len
-                                        scrollingIntoLineBuffer:linebuffer_
-                                            unlimitedScrollback:unlimitedScrollback_
-                                        useScrollbackWithRegion:[self useScrollbackWithRegion]]];
-
 
     if (dynamicBuffer) {
         free(dynamicBuffer);
+    }
+    
+    if (commandStartX_ != -1) {
+        [delegate_ screenCommandDidChangeWithRange:[self commandRange]];
     }
 }
 
@@ -1787,6 +1796,11 @@ static const double kInterBellQuietPeriod = 0.1;
             currentGrid_.cursor = VT100GridCoordMake(currentGrid_.size.width - 2, cursorY - 1);
         }
     }
+    
+    if (commandStartX_ != -1 && (currentGrid_.cursorX != cursorX ||
+                                 currentGrid_.cursorY != cursorY)) {
+        [delegate_ screenCommandDidChangeWithRange:[self commandRange]];
+    }
 }
 
 - (void)terminalAppendTabAtCursor
@@ -2097,7 +2111,7 @@ static const double kInterBellQuietPeriod = 0.1;
         [charsetUsesLineDrawingMode_ addObject:[NSNumber numberWithBool:NO]];
     }
     [delegate_ screenDidReset];
-
+    commandStartX_ = commandStartY_ = -1;
     [self showCursor:YES];
 }
 
@@ -2563,6 +2577,7 @@ static const double kInterBellQuietPeriod = 0.1;
 
     [currentGrid_ markAllCharsDirty:YES];
     [delegate_ screenNeedsRedraw];
+    commandStartX_ = commandStartY_ = -1;
 }
 
 - (void)hideOnScreenNotesAndTruncateSpanners
@@ -2589,6 +2604,7 @@ static const double kInterBellQuietPeriod = 0.1;
     if (currentGrid_ == altGrid_) {
         [self hideOnScreenNotesAndTruncateSpanners];
         currentGrid_ = primaryGrid_;
+        commandStartX_ = commandStartY_ = -1;
         [self swapNotes];
         [self reloadMarkCache];
 
@@ -2734,12 +2750,55 @@ static const double kInterBellQuietPeriod = 0.1;
 - (void)terminalWillReceiveFileNamed:(NSString *)name ofSize:(int)size {
     [delegate_ screenWillReceiveFileNamed:name ofSize:size];
 }
+
+- (void)terminalWillReceiveInlineFileNamed:(NSString *)name
+                                    ofSize:(int)size
+                                     width:(int)width
+                                    height:(int)height
+                       preserveAspectRatio:(BOOL)preserveAspectRatio {
+    if (height > 255 || width >= self.width) {
+        return;
+    }
+
+    // Allocate cells for the image.
+    // TODO: Support scroll regions.
+    int xOffset = self.cursorX;
+    int screenWidth = currentGrid_.size.width;
+    screen_char_t c = ImageCharForNewImage(name, width, height, preserveAspectRatio);
+    for (int y = 0; y < height; y++) {
+        for (int x = xOffset; x < xOffset + width && x < screenWidth; x++) {
+            SetPositionInImageChar(&c, x - xOffset, y);
+            [currentGrid_ setCharsFrom:VT100GridCoordMake(x, currentGrid_.cursorY)
+                                    to:VT100GridCoordMake(x, currentGrid_.cursorY)
+                                toChar:c];
+        }
+        [self linefeed];
+    }
+    
+    inlineFileCode_ = c.code;
+}
+
 - (void)terminalDidFinishReceivingFile {
-    [delegate_ screenDidFinishReceivingFile];
+    if (inlineFileCode_) {
+        [self decodeInlineFile];
+        [delegate_ screenNeedsRedraw];
+        inlineFileCode_ = 0;
+        [inlineFile_ release];
+        inlineFile_ = nil;
+    } else {
+        [delegate_ screenDidFinishReceivingFile];
+    }
 }
 
 - (void)terminalDidReceiveBase64FileData:(NSString *)data {
-    [delegate_ screenDidReceiveBase64FileData:data];
+    if (inlineFileCode_) {
+        if (!inlineFile_) {
+            inlineFile_ = [[NSMutableString alloc] init];
+        }
+        [inlineFile_ appendString:data];
+    } else {
+        [delegate_ screenDidReceiveBase64FileData:data];
+    }
 }
 
 - (void)terminalFileReceiptEndedUnexpectedly {
@@ -2822,7 +2881,59 @@ static const double kInterBellQuietPeriod = 0.1;
     [delegate_ screenSetCursorVisible:visible];
 }
 
+- (void)terminalPromptDidStart; {
+    // FinalTerm uses this to define the start of a collapsable region. That would be a nightmare
+    // to add to iTerm, and our answer to this is marks, which already existed anyway.
+    [delegate_ screenAddMarkOnLine:[self numberOfScrollbackLines] + self.cursorY - 1];
+}
+
+- (void)terminalCommandDidStart {
+    commandStartX_ = currentGrid_.cursorX;
+    commandStartY_ = currentGrid_.cursorY + [self numberOfScrollbackLines] + [self totalScrollbackOverflow];
+    [delegate_ screenCommandDidChangeWithRange:[self commandRange]];
+}
+
+- (void)terminalCommandDidEnd {
+    if (commandStartX_ != -1) {
+        [delegate_ screenCommandDidEndWithRange:[self commandRange]];
+        commandStartX_ = commandStartY_ = -1;
+        [delegate_ screenCommandDidChangeWithRange:[self commandRange]];
+    }
+}
+
+- (void)terminalSemanticTextDidStartOfType:(VT100TerminalSemanticTextType)type {
+    // TODO
+}
+
+- (void)terminalSemanticTextDidEndOfType:(VT100TerminalSemanticTextType)type {
+    // TODO
+}
+
+- (void)terminalProgressAt:(double)fraction label:(NSString *)label {
+     // TODO
+}
+
+- (void)terminalProgressDidFinish {
+    // TODO
+}
+
+- (void)terminalReturnCodeOfLastCommandWas:(int)returnCode {
+    // TODO
+}
+
 #pragma mark - Private
+
+- (VT100GridCoordRange)commandRange {
+    long long offset = [self totalScrollbackOverflow];
+    if (commandStartX_ < 0) {
+        return VT100GridCoordRangeMake(-1, -1, -1, -1);
+    } else {
+        return VT100GridCoordRangeMake(commandStartX_,
+                                       commandStartY_ - offset,
+                                       currentGrid_.cursorX,
+                                       currentGrid_.cursorY + [self numberOfScrollbackLines]);
+    }
+}
 
 - (void)setInitialTabStops
 {
@@ -3389,6 +3500,35 @@ static void SwapInt(int *a, int *b) {
     [self popScrollbackLines:linesPushed];
     return keepSearching;
 }
+
+- (void)decodeInlineFile {
+    // TODO: Handle objects other than images.
+    const char *buffer = [inlineFile_ UTF8String];
+    int destLength = apr_base64_decode_len(buffer);
+    if (destLength <= 0) {
+        goto error;
+    }
+    
+    NSMutableData *data = [NSMutableData dataWithLength:destLength];
+    char *decodedBuffer = [data mutableBytes];
+    int resultLength = apr_base64_decode(decodedBuffer, buffer);
+    if (resultLength <= 0) {
+        goto error;
+    }
+    
+    NSImage *image = [[[NSImage alloc] initWithData:data] autorelease];
+    if (!image) {
+        goto error;
+    }
+    
+    SetDecodedImage(inlineFileCode_, image);
+    [inlineFileCodes_ addObject:@(inlineFileCode_)];
+    return;
+    
+error:
+    SetDecodedImage(inlineFileCode_, [NSImage imageNamed:@"broken_image"]);
+}
+
 
 #pragma mark - PTYNoteViewControllerDelegate
 
