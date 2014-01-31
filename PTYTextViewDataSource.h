@@ -14,6 +14,7 @@ typedef enum {
 @class PTYTask;
 @class SCPPath;
 @class VT100RemoteHost;
+@class VT100ScreenMark;
 @class VT100Terminal;
 
 @protocol PTYTextViewDataSource
@@ -68,6 +69,7 @@ typedef enum {
 // whereas that wouldn't normally be a legal X value. If possible, the char to the right of the
 // cursor is also set dirty to handle DWCs.
 - (void)setCharDirtyAtCursorX:(int)x Y:(int)y;
+- (void)setLineDirtyAtY:(int)y;
 
 // Check if any the character at x,y has been marked dirty.
 - (BOOL)isDirtyAtX:(int)x Y:(int)y;
@@ -95,7 +97,7 @@ typedef enum {
 
 - (VT100GridCoordRange)coordRangeOfNote:(PTYNoteViewController *)note;
 - (NSArray *)charactersWithNotesOnLine:(int)line;
-- (BOOL)hasMarkOnLine:(int)line;
+- (VT100ScreenMark *)markOnLine:(int)line;
 - (NSString *)workingDirectoryOnLine:(int)line;
 - (SCPPath *)scpPathForFile:(NSString *)filename onLine:(int)line;
 - (VT100RemoteHost *)remoteHostOnLine:(int)line;

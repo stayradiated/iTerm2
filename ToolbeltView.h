@@ -10,6 +10,7 @@
 #import "ToolWrapper.h"
 #import "FutureMethods.h"
 
+@class ToolCommandHistoryView;
 @class ToolbeltSplitView;
 @class PseudoTerminal;
 
@@ -39,5 +40,8 @@
 - (void)shutdown;
 
 - (void)setUseDarkDividers:(BOOL)useDarkDividers;
+
+- (ToolCommandHistoryView *)commandHistoryView;
+- (void)relayoutAllTools;
 
 @end

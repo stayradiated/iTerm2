@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
-<document type="com.apple.InterfaceBuilder3.Cocoa.XIB" version="3.0" toolsVersion="4514" systemVersion="13A2093" targetRuntime="MacOSX.Cocoa" propertyAccessControl="none">
+<document type="com.apple.InterfaceBuilder3.Cocoa.XIB" version="3.0" toolsVersion="4514" systemVersion="13B42" targetRuntime="MacOSX.Cocoa" propertyAccessControl="none">
     <dependencies>
         <deployment defaultVersion="1070" identifier="macosx"/>
         <plugIn identifier="com.apple.InterfaceBuilder.CocoaPlugin" version="4514"/>
@@ -333,7 +333,7 @@ DQ
                                     <action selector="copy:" target="-1" id="1327"/>
                                 </connections>
                             </menuItem>
-                            <menuItem title="Copy with Styles" keyEquivalent="c" id="n4U-yI-y7D">
+                            <menuItem title="Copy with Styles" alternate="YES" keyEquivalent="c" id="n4U-yI-y7D">
                                 <modifierMask key="keyEquivalentModifierMask" option="YES" command="YES"/>
                                 <connections>
                                     <action selector="copyWithStyles:" target="-1" id="B2X-kC-nrq"/>
@@ -369,6 +369,12 @@ DQ
                                             <modifierMask key="keyEquivalentModifierMask"/>
                                             <connections>
                                                 <action selector="paste:" target="-1" id="1169"/>
+                                            </connections>
+                                        </menuItem>
+                                        <menuItem title="Paste File with Base64 Encoding" tag="2" id="LzY-eC-RYe">
+                                            <modifierMask key="keyEquivalentModifierMask"/>
+                                            <connections>
+                                                <action selector="pasteBase64Encoded:" target="-1" id="OMO-E1-H3J"/>
                                             </connections>
                                         </menuItem>
                                         <menuItem isSeparatorItem="YES" id="1491"/>
@@ -411,12 +417,18 @@ DQ
                                     <action selector="selectAll:" target="-1" id="179"/>
                                 </connections>
                             </menuItem>
+                            <menuItem isSeparatorItem="YES" id="1145"/>
                             <menuItem title="Open Paste History..." keyEquivalent="H" id="1142">
                                 <connections>
                                     <action selector="openPasteHistory:" target="-1" id="1143"/>
                                 </connections>
                             </menuItem>
-                            <menuItem isSeparatorItem="YES" id="1145"/>
+                            <menuItem title="Open Command History..." alternate="YES" keyEquivalent="y" id="MXE-be-qxv">
+                                <modifierMask key="keyEquivalentModifierMask" option="YES" command="YES"/>
+                                <connections>
+                                    <action selector="openCommandHistory:" target="-1" id="XHr-bn-Hbc"/>
+                                </connections>
+                            </menuItem>
                             <menuItem title="Open Autocomplete..." keyEquivalent=";" id="1144">
                                 <connections>
                                     <action selector="openAutocomplete:" target="-1" id="1146"/>
@@ -499,22 +511,6 @@ DQ
                                 <connections>
                                     <action selector="toggleAlertOnNextMark:" target="-1" id="hTO-Iy-yuC"/>
                                 </connections>
-                            </menuItem>
-                            <menuItem isSeparatorItem="YES" id="5a1-MJ-4uR">
-                                <modifierMask key="keyEquivalentModifierMask" command="YES"/>
-                                <menu key="submenu" id="tEw-W0-CB4">
-                                    <items>
-                                        <menuItem title="Item 1" enabled="NO" id="A6D-EZ-4C7">
-                                            <modifierMask key="keyEquivalentModifierMask"/>
-                                        </menuItem>
-                                        <menuItem title="Item 2" enabled="NO" id="4fq-WI-27g">
-                                            <modifierMask key="keyEquivalentModifierMask"/>
-                                        </menuItem>
-                                        <menuItem title="Item 3" enabled="NO" id="U95-Js-BA7">
-                                            <modifierMask key="keyEquivalentModifierMask"/>
-                                        </menuItem>
-                                    </items>
-                                </menu>
                             </menuItem>
                             <menuItem title="Add note at cursor" keyEquivalent="m" id="Fna-Ng-9y6">
                                 <modifierMask key="keyEquivalentModifierMask" option="YES" command="YES"/>
@@ -801,6 +797,37 @@ DQ
                                         <menuItem title="Previous Pane" keyEquivalent="[" id="1251">
                                             <connections>
                                                 <action selector="previousPane:" target="-1" id="1254"/>
+                                            </connections>
+                                        </menuItem>
+                                    </items>
+                                </menu>
+                            </menuItem>
+                            <menuItem title="Resize Split Pane" id="R0v-Kn-z9m">
+                                <modifierMask key="keyEquivalentModifierMask"/>
+                                <menu key="submenu" title="Resize Split Pane" id="nnc-o3-t2j">
+                                    <items>
+                                        <menuItem title="Move Divider Up" keyEquivalent="" id="2Jk-GR-zCt">
+                                            <modifierMask key="keyEquivalentModifierMask" control="YES" command="YES"/>
+                                            <connections>
+                                                <action selector="movePaneDividerUp:" target="-1" id="smA-wj-JIK"/>
+                                            </connections>
+                                        </menuItem>
+                                        <menuItem title="Move Divider Down" keyEquivalent="" id="Qpv-Ie-1sh">
+                                            <modifierMask key="keyEquivalentModifierMask" control="YES" command="YES"/>
+                                            <connections>
+                                                <action selector="movePaneDividerDown:" target="-1" id="NVB-Pj-Xdg"/>
+                                            </connections>
+                                        </menuItem>
+                                        <menuItem title="Move Divider Left" keyEquivalent="" id="avG-JI-rjO">
+                                            <modifierMask key="keyEquivalentModifierMask" control="YES" command="YES"/>
+                                            <connections>
+                                                <action selector="movePaneDividerLeft:" target="-1" id="0Jq-7S-KVC"/>
+                                            </connections>
+                                        </menuItem>
+                                        <menuItem title="Move Divider Right" keyEquivalent="" id="t6w-8j-r4m">
+                                            <modifierMask key="keyEquivalentModifierMask" control="YES" command="YES"/>
+                                            <connections>
+                                                <action selector="movePaneDividerRight:" target="-1" id="0Bz-xh-KL2"/>
                                             </connections>
                                         </menuItem>
                                     </items>

@@ -51,6 +51,10 @@ typedef enum {
     CHARTYPE_OTHER,       // Symbols, etc. Anything that doesn't fall into the other categories.
 } PTYCharType;
 
+typedef enum {
+    kTextViewPasteEncodingBase64
+} TextViewPasteEncoding;
+
 @protocol PTYTextViewDelegate <NSObject>
 
 - (BOOL)xtermMouseReporting;
@@ -65,6 +69,7 @@ typedef enum {
 - (void)pasteString:(NSString *)aString;
 - (void)paste:(id)sender;
 - (void)textViewFontDidChange;
+- (void)textViewSizeDidChange;
 - (PTYScrollView *)SCROLLVIEW;
 - (void)sendEscapeSequence:(NSString *)text;
 - (void)sendHexCode:(NSString *)codes;
@@ -104,6 +109,8 @@ typedef enum {
 - (void)textViewCloseWithConfirmation;
 - (NSString *)textViewPasteboardString;
 - (void)textViewPasteFromSessionWithMostRecentSelection;
+- (void)textViewPasteWithEncoding:(TextViewPasteEncoding)encoding;
+- (BOOL)textViewCanPasteFile;
 - (BOOL)textViewWindowUsesTransparency;
 - (BOOL)textViewAmbiguousWidthCharsAreDoubleWidth;
 - (PTYScroller *)textViewVerticalScroller;
@@ -113,6 +120,7 @@ typedef enum {
 - (void)textViewMovePane;
 - (NSStringEncoding)textViewEncoding;
 - (NSString *)textViewCurrentWorkingDirectory;
+- (BOOL)textViewShouldPlaceCursor;
 @end
 
 @interface PTYTextView : NSView <
@@ -120,6 +128,9 @@ typedef enum {
   NSTextInput,
   PointerControllerDelegate,
   TrouterDelegate>
+
+// Draw a highlight along the entire line the cursor is on.
+@property(nonatomic, assign) BOOL highlightCursorLine;
 
 // Returns the mouse cursor to use when the mouse is in this view.
 + (NSCursor *)textViewCursor;
@@ -194,6 +205,8 @@ typedef enum {
 
 // Copy the current selection to the pasteboard, preserving style.
 - (IBAction)copyWithStyles:(id)sender;
+
+- (IBAction)pasteBase64Encoded:(id)sender;
 
 // Paste from the pasteboard.
 - (void)paste:(id)sender;
@@ -292,10 +305,12 @@ typedef enum {
 // Update the scroll position and schedule a redraw. Returns true if anything
 // onscreen is blinking.
 - (BOOL)refresh;
+- (void)setNeedsDisplayOnLine:(int)line;
 
 // Change visibility of cursor
 - (void)showCursor;
 - (void)hideCursor;
+- (BOOL)cursorIsVisible;
 
 // selection
 - (IBAction)selectAll:(id)sender;

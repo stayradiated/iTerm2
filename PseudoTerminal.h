@@ -149,6 +149,8 @@
 // Accessor for toolbelt view.
 - (ToolbeltView *)toolbelt;
 
+- (void)refreshTools;
+
 #pragma mark - NSTextField Delegate Methods
 
 // Called when return or tab is pressed in the bottombar text field or the command
@@ -393,6 +395,7 @@
 - (IBAction)openSplitVerticallySheet:(id)sender;
 // Show paste history window.
 - (IBAction)openPasteHistory:(id)sender;
+- (IBAction)openCommandHistory:(id)sender;
 // Show autocomplete window.
 - (IBAction)openAutocomplete:(id)sender;
 // selector for menu item to split current session vertically.
@@ -415,6 +418,10 @@
 - (IBAction)selectPaneRight:(id)sender;
 - (IBAction)selectPaneUp:(id)sender;
 - (IBAction)selectPaneDown:(id)sender;
+- (IBAction)movePaneDividerRight:(id)sender;
+- (IBAction)movePaneDividerLeft:(id)sender;
+- (IBAction)movePaneDividerDown:(id)sender;
+- (IBAction)movePaneDividerUp:(id)sender;
 - (IBAction)addNoteAtCursor:(id)sender;
 - (IBAction)showHideNotes:(id)sender;
 - (IBAction)nextMarkOrNote:(id)sender;

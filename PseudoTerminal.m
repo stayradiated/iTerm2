@@ -2,6 +2,8 @@
 
 #import "BottomBarView.h"
 #import "ColorsMenuItemView.h"
+#import "CommandHistory.h"
+#import "CommandHistoryPopup.h"
 #import "Coprocess.h"
 #import "FakeWindow.h"
 #import "FindViewController.h"
@@ -33,6 +35,7 @@
 #import "TemporaryNumberAllocator.h"
 #import "TmuxDashboardController.h"
 #import "TmuxLayoutParser.h"
+#import "ToolCommandHistoryView.h"
 #import "ToolbeltView.h"
 #import "VT100Screen.h"
 #import "VT100Screen.h"
@@ -58,6 +61,7 @@ static NSString* TERMINAL_ARRANGEMENT_X_ORIGIN = @"X Origin";
 static NSString* TERMINAL_ARRANGEMENT_Y_ORIGIN = @"Y Origin";
 static NSString* TERMINAL_ARRANGEMENT_WIDTH = @"Width";
 static NSString* TERMINAL_ARRANGEMENT_HEIGHT = @"Height";
+static NSString* TERMINAL_ARRANGEMENT_EDGE_SPANNING_OFF = @"Edge Spanning Off";
 static NSString* TERMINAL_ARRANGEMENT_TABS = @"Tabs";
 static NSString* TERMINAL_ARRANGEMENT_FULLSCREEN = @"Fullscreen";
 static NSString* TERMINAL_ARRANGEMENT_LION_FULLSCREEN = @"LionFullscreen";
@@ -194,6 +198,7 @@ NSString *kSessionsKVCKey = @"sessions";
     IBOutlet NSTextField* currentTime;
 
     PasteboardHistoryWindowController* pbHistoryView;
+    CommandHistoryPopupWindowController *commandHistoryPopup;
     AutocompleteView* autocompleteView;
 
     // True if preBottomBarFrame is valid.
@@ -283,6 +288,14 @@ NSString *kSessionsKVCKey = @"sessions";
     // Initialized to -1 in -init and then set to the size of the first session
     // forever.
     int desiredRows_, desiredColumns_;
+    
+    // If set, then an edge window (top, left, bottom, right of screen) does
+    // not span the entire visible edge of the screen because the user has
+    // manually resized it. This will be remembered by saved arrangements and
+    // restored. When the window frames are canonicalized (e.g., because
+    // displays changed), this flag keeps the windows from getting resized to
+    // the full width/height of the screen.
+    BOOL edgeSpanningOff_;
 }
 
 - (id)init {
@@ -380,6 +393,7 @@ NSString *kSessionsKVCKey = @"sessions";
     broadcastViewIds_ = [[NSMutableSet alloc] init];
     pbHistoryView = [[PasteboardHistoryWindowController alloc] init];
     autocompleteView = [[AutocompleteView alloc] init];
+    commandHistoryPopup = [[CommandHistoryPopupWindowController alloc] init];
 
     NSScreen* screen;
     if (screenNumber < 0 || screenNumber >= [[NSScreen screens] count])  {
@@ -462,6 +476,8 @@ NSString *kSessionsKVCKey = @"sessions";
         case WINDOW_TYPE_BOTTOM:
         case WINDOW_TYPE_LEFT:
         case WINDOW_TYPE_RIGHT:
+            styleMask = NSBorderlessWindowMask | NSResizableWindowMask;
+            break;
         case WINDOW_TYPE_FORCE_FULL_SCREEN:
             styleMask = NSBorderlessWindowMask;
             break;
@@ -657,6 +673,7 @@ NSString *kSessionsKVCKey = @"sessions";
     [autocompleteView shutdown];
     [pbHistoryView shutdown];
     [pbHistoryView release];
+    [commandHistoryPopup release];
     [autocompleteView release];
     [tabBarControl release];
     [terminalGuid_ release];
@@ -709,7 +726,7 @@ NSString *kSessionsKVCKey = @"sessions";
 
 - (CGFloat)tabviewWidth
 {
-    if ([self anyFullScreen]) {
+    if ([self anyFullScreen] || [self isEdgeWindow]) {
         iTermApplicationDelegate *itad = (iTermApplicationDelegate *)[[iTermApplication sharedApplication] delegate];
         if ([itad showToolbelt] && !exitingLionFullscreen_) {
             const CGFloat width = [self fullscreenToolbeltWidth];
@@ -1509,6 +1526,7 @@ NSString *kSessionsKVCKey = @"sessions";
         // TODO: for window type top, set width to screen width.
         rect.size.width = [[arrangement objectForKey:TERMINAL_ARRANGEMENT_WIDTH] doubleValue];
         rect.size.height = [[arrangement objectForKey:TERMINAL_ARRANGEMENT_HEIGHT] doubleValue];
+        term->edgeSpanningOff_ = [arrangement[TERMINAL_ARRANGEMENT_EDGE_SPANNING_OFF] boolValue];
         [[term window] setFrame:rect display:NO];
     }
 
@@ -1685,6 +1703,7 @@ NSString *kSessionsKVCKey = @"sessions";
 
     [result setObject:[NSNumber numberWithInt:([self lionFullScreen] ? WINDOW_TYPE_LION_FULL_SCREEN : windowType_)]
                forKey:TERMINAL_ARRANGEMENT_WINDOW_TYPE];
+    [result setObject:@(edgeSpanningOff_) forKey:TERMINAL_ARRANGEMENT_EDGE_SPANNING_OFF];
     [result setObject:[NSNumber numberWithInt:[[NSScreen screens] indexOfObjectIdenticalTo:[[self window] screen]]]
                                        forKey:TERMINAL_ARRANGEMENT_SCREEN_INDEX];
     [result setObject:[NSNumber numberWithInt:desiredRows_]
@@ -1750,6 +1769,10 @@ NSString *kSessionsKVCKey = @"sessions";
     return toolbelt_;
 }
 
+- (void)refreshTools {
+    [[toolbelt_ commandHistoryView] updateCommands];
+}
+
 - (int)numRunningSessions
 {
     int n = 0;
@@ -1801,6 +1824,7 @@ NSString *kSessionsKVCKey = @"sessions";
     // Close popups.
     [pbHistoryView close];
     [autocompleteView close];
+    [commandHistoryPopup close];
 
     // tabBarControl is holding on to us, so we have to tell it to let go
     [tabBarControl setDelegate:nil];
@@ -1974,8 +1998,15 @@ NSString *kSessionsKVCKey = @"sessions";
             } else {
                 frame.size.height = MIN([screen visibleFrame].size.height, frame.size.height);
             }
-            frame.size.width = [screen visibleFrame].size.width;
-            frame.origin.x = [screen visibleFrame].origin.x;
+            if (edgeSpanningOff_) {
+                frame.size.width = MIN(frame.size.width, [screen visibleFrame].size.width);
+                frame.origin.x = MAX(frame.origin.x, screen.visibleFrame.origin.x);
+                double freeSpaceOnLeft = MIN(0, [screen visibleFrame].size.width - frame.size.width - (frame.origin.x - screen.visibleFrame.origin.x));
+                frame.origin.x += freeSpaceOnLeft;
+            } else {
+                frame.size.width = [screen visibleFrame].size.width;
+                frame.origin.x = [screen visibleFrame].origin.x;
+            }
             if ([[self window] alphaValue] == 0) {
                 // Is hidden hotkey window
                 frame.origin.y = [screen visibleFrame].origin.y + [screen visibleFrame].size.height;
@@ -1998,8 +2029,15 @@ NSString *kSessionsKVCKey = @"sessions";
             } else {
                 frame.size.height = MIN([screen visibleFrame].size.height, frame.size.height);
             }
-            frame.size.width = [screen visibleFrame].size.width;
-            frame.origin.x = [screen visibleFrame].origin.x;
+            if (edgeSpanningOff_) {
+                frame.size.width = MIN(frame.size.width, [screen visibleFrame].size.width);
+                frame.origin.x = MAX(frame.origin.x, screen.visibleFrame.origin.x);
+                double freeSpaceOnLeft = MIN(0, [screen visibleFrame].size.width - frame.size.width - (frame.origin.x - screen.visibleFrame.origin.x));
+                frame.origin.x += freeSpaceOnLeft;
+            } else {
+                frame.size.width = [screen visibleFrame].size.width;
+                frame.origin.x = [screen visibleFrame].origin.x;
+            }
             if ([[self window] alphaValue] == 0) {
                 // Is hidden hotkey window
                 frame.origin.y = [screen visibleFrame].origin.y - frame.size.height;
@@ -2022,8 +2060,15 @@ NSString *kSessionsKVCKey = @"sessions";
             } else {
                 frame.size.width = MIN([screen visibleFrame].size.width, frame.size.width);
             }
-            frame.size.height = [screen visibleFrame].size.height;
-            frame.origin.y = [screen visibleFrame].origin.y;
+            if (edgeSpanningOff_) {
+                frame.size.height = MIN(frame.size.height, [screen visibleFrame].size.height);
+                frame.origin.y = MAX(frame.origin.y, screen.visibleFrame.origin.y);
+                double freeSpaceOnBottom = MIN(0, [screen visibleFrame].size.height - frame.size.height - (frame.origin.y - screen.visibleFrame.origin.y));
+                frame.origin.y += freeSpaceOnBottom;
+            } else {
+                frame.size.height = [screen visibleFrame].size.height;
+                frame.origin.y = [screen visibleFrame].origin.y;
+            }
             if ([[self window] alphaValue] == 0) {
                 // Is hidden hotkey window
                 frame.origin.x = [screen visibleFrame].origin.x - frame.size.width;
@@ -2046,8 +2091,15 @@ NSString *kSessionsKVCKey = @"sessions";
             } else {
                 frame.size.width = MIN([screen visibleFrame].size.width, frame.size.width);
             }
-            frame.size.height = [screen visibleFrame].size.height;
-            frame.origin.y = [screen visibleFrame].origin.y;
+            if (edgeSpanningOff_) {
+                frame.size.height = MIN(frame.size.height, [screen visibleFrame].size.height);
+                frame.origin.y = MAX(frame.origin.y, screen.visibleFrame.origin.y);
+                double freeSpaceOnBottom = MIN(0, [screen visibleFrame].size.height - frame.size.height - (frame.origin.y - screen.visibleFrame.origin.y));
+                frame.origin.y += freeSpaceOnBottom;
+            } else {
+                frame.size.height = [screen visibleFrame].size.height;
+                frame.origin.y = [screen visibleFrame].origin.y;
+            }
             if ([[self window] alphaValue] == 0) {
                 // Is hidden hotkey window
                 frame.origin.x = [screen visibleFrame].origin.x + [screen visibleFrame].size.width;
@@ -2086,7 +2138,7 @@ NSString *kSessionsKVCKey = @"sessions";
             break;
     }
 
-    if ([self anyFullScreen]) {
+    if ([self anyFullScreen] || [self isEdgeWindow]) {
         [toolbelt_ setFrame:[self fullscreenToolbeltFrame]];
     }
 }
@@ -2145,7 +2197,8 @@ NSString *kSessionsKVCKey = @"sessions";
     }
 
     if ([[pbHistoryView window] isVisible] ||
-        [[autocompleteView window] isVisible]) {
+        [[autocompleteView window] isVisible] ||
+        [[commandHistoryPopup window] isVisible]) {
         return;
     }
 
@@ -2187,6 +2240,20 @@ NSString *kSessionsKVCKey = @"sessions";
     // update the cursor
     [[[self currentSession] TEXTVIEW] refresh];
     [[[self currentSession] TEXTVIEW] setNeedsDisplay:YES];
+}
+
+- (BOOL)isEdgeWindow
+{
+    switch (windowType_) {
+        case WINDOW_TYPE_LEFT:
+        case WINDOW_TYPE_TOP:
+        case WINDOW_TYPE_BOTTOM:
+        case WINDOW_TYPE_RIGHT:
+            return YES;
+            
+        default:
+            return NO;
+    }
 }
 
 - (BOOL)anyFullScreen
@@ -2606,15 +2673,12 @@ NSString *kSessionsKVCKey = @"sessions";
         }
         // remove from our window
         PtyLog(@"toggleFullScreenMode - remove tab %d from old window", i);
-        NSColor *tabColor = [[self tabColorForTabViewItem:aTabViewItem] retain];
         [TABVIEW removeTabViewItem:aTabViewItem];
 
         // add the session to the new terminal
         PtyLog(@"toggleFullScreenMode - add tab %d from old window", i);
         [newTerminal insertTab:theTab atIndex:i];
         NSTabViewItem *newTabViewItem = [theTab tabViewItem];
-        [newTerminal setTabColor:tabColor forTabViewItem:newTabViewItem];
-        [tabColor release];
         PtyLog(@"toggleFullScreenMode - done inserting session");
 
         // release the tabViewItem
@@ -2691,6 +2755,8 @@ NSString *kSessionsKVCKey = @"sessions";
     togglingFullScreen_ = false;
 
     [newTerminal.window performSelector:@selector(makeKeyAndOrderFront:) withObject:nil afterDelay:0];
+    [newTerminal refreshTools];
+    [newTerminal updateTabColors];
     [self release];
 }
 
@@ -2734,6 +2800,36 @@ NSString *kSessionsKVCKey = @"sessions";
 
 - (void)windowDidEndLiveResize:(NSNotification *)notification
 {
+    NSScreen *screen = self.window.screen;
+    NSRect frame = self.window.frame;
+    switch (windowType_) {
+        case WINDOW_TYPE_TOP:
+            frame.origin.y = [screen visibleFrame].origin.y + [screen visibleFrame].size.height - frame.size.height;
+            edgeSpanningOff_ = (frame.size.width < [screen visibleFrame].size.width);
+            break;
+            
+        case WINDOW_TYPE_BOTTOM:
+            edgeSpanningOff_ = (frame.size.width < [screen visibleFrame].size.width);
+            frame.origin.y = [screen visibleFrame].origin.y;
+            break;
+            
+        case WINDOW_TYPE_LEFT:
+            edgeSpanningOff_ = (frame.size.height < [screen visibleFrame].size.height);
+            frame.origin.x = [screen visibleFrame].origin.x;
+            break;
+            
+        case WINDOW_TYPE_RIGHT:
+            edgeSpanningOff_ = (frame.size.height < [screen visibleFrame].size.height);
+            frame.origin.x = [screen visibleFrame].origin.x + [screen visibleFrame].size.width - frame.size.width;
+            break;
+            
+        default:
+            break;
+    }
+    if (!NSEqualRects(frame, self.window.frame)) {
+        [[self window] setFrame:frame display:NO];
+    }
+
     liveResize_ = NO;
     BOOL wasZooming = zooming_;
     zooming_ = NO;
@@ -3045,18 +3141,6 @@ NSString *kSessionsKVCKey = @"sessions";
     if ([[autocompleteView window] isVisible]) {
         [autocompleteView close];
     }
-    NSColor* newTabColor = [tabBarControl tabColorForTabViewItem:tabViewItem];
-    if ([tabView numberOfTabViewItems] == 1 &&
-        [[PreferencePanel sharedInstance] hideTab] &&
-        newTabColor) {
-        // Draw colored title bar (and tab bar, and tab bar background).
-        [[self window] setBackgroundColor:newTabColor];
-        [background_ setColor:newTabColor];
-    } else {
-        // Draw normal title bar.
-        [[self window] setBackgroundColor:nil];
-        [background_ setColor:normalBackgroundColor];
-    }
 }
 
 - (void)enableBlur:(double)radius
@@ -3125,6 +3209,8 @@ NSString *kSessionsKVCKey = @"sessions";
     [self showOrHideInstantReplayBar];
     iTermApplicationDelegate *itad = (iTermApplicationDelegate *)[[iTermApplication sharedApplication] delegate];
     [itad updateBroadcastMenuState];
+    [[toolbelt_ commandHistoryView] updateCommands];
+    [self updateTabColors];
 }
 
 - (void)showOrHideInstantReplayBar
@@ -3356,22 +3442,7 @@ NSString *kSessionsKVCKey = @"sessions";
         }
     }
 
-    BOOL setWindowBackground = NO;
-    if ([tabView numberOfTabViewItems] == 1) {
-        NSColor* newTabColor = [tabBarControl tabColorForTabViewItem:[tabView tabViewItemAtIndex:0]];
-        if ([[PreferencePanel sharedInstance] hideTab] && newTabColor) {
-            // Draw colored title bar (and tab bar, and tab bar background).
-            [[self window] setBackgroundColor:newTabColor];
-            [background_ setColor:newTabColor];
-            setWindowBackground = YES;
-        }
-    }
-    if (!setWindowBackground) {
-        // Draw normal title bar.
-        [[self window] setBackgroundColor:nil];
-        [background_ setColor:normalBackgroundColor];
-    }
-
+    [self updateTabColors];
     [self _updateTabObjectCounts];
 
     [[NSNotificationCenter defaultCenter] postNotificationName: @"iTermNumberOfSessionsDidChange" object: self userInfo: nil];
@@ -3542,26 +3613,26 @@ NSString *kSessionsKVCKey = @"sessions";
     }
 }
 
-- (void)setTabColor:(NSColor*)color forTabViewItem:(NSTabViewItem*)tabViewItem
+- (void)updateTabColors
 {
-    [tabBarControl setTabColor:color forTabViewItem:tabViewItem];
-    if ([TABVIEW selectedTabViewItem] == tabViewItem) {
-        NSColor* newTabColor = [tabBarControl tabColorForTabViewItem:tabViewItem];
-        if ([TABVIEW numberOfTabViewItems] == 1 &&
-            [[PreferencePanel sharedInstance] hideTab] &&
-            newTabColor) {
-            [[self window] setBackgroundColor:newTabColor];
-            [background_ setColor:newTabColor];
-        } else {
-              [[self window] setBackgroundColor:nil];
-              [background_ setColor:normalBackgroundColor];
+    for (PTYTab *aTab in [self tabs]) {
+        NSTabViewItem *tabViewItem = [aTab tabViewItem];
+        PTYSession *aSession = [aTab activeSession];
+        NSColor *color = [aSession tabColor];
+        [tabBarControl setTabColor:color forTabViewItem:tabViewItem];
+        if ([TABVIEW selectedTabViewItem] == tabViewItem) {
+            NSColor* newTabColor = [tabBarControl tabColorForTabViewItem:tabViewItem];
+            if ([TABVIEW numberOfTabViewItems] == 1 &&
+                [[PreferencePanel sharedInstance] hideTab] &&
+                newTabColor) {
+                [[self window] setBackgroundColor:newTabColor];
+                [background_ setColor:newTabColor];
+            } else {
+                [[self window] setBackgroundColor:nil];
+                [background_ setColor:normalBackgroundColor];
+            }
         }
     }
-}
-
-- (NSColor*)tabColorForTabViewItem:(NSTabViewItem*)tabViewItem
-{
-    return [tabBarControl tabColorForTabViewItem:tabViewItem];
 }
 
 - (PTYTabView *)tabView
@@ -3953,6 +4024,17 @@ NSString *kSessionsKVCKey = @"sessions";
     [pbHistoryView popWithDelegate:[self currentSession]];
 }
 
+- (IBAction)openCommandHistory:(id)sender
+{
+    if ([[CommandHistory sharedInstance] commandHistoryHasEverBeenUsed]) {
+        [commandHistoryPopup popWithDelegate:[self currentSession]];
+        [commandHistoryPopup loadCommandsForHost:[[self currentSession] currentHost]
+                                  partialCommand:[[self currentSession] currentCommand]];
+    } else {
+        [CommandHistory showInformationalMessage];
+    }
+}
+
 - (IBAction)openAutocomplete:(id)sender
 {
     if ([[autocompleteView window] isVisible]) {
@@ -4031,6 +4113,7 @@ NSString *kSessionsKVCKey = @"sessions";
            performSetup:(BOOL)performSetup
 {
     NSView *scrollView;
+    NSColor *tabColor = [[[tabBarControl tabColorForTabViewItem:[[self currentTab] tabViewItem]] retain] autorelease];
     SessionView* sessionView = [[self currentTab] splitVertically:isVertical
                                                            before:before
                                                     targetSession:targetSession];
@@ -4060,6 +4143,8 @@ NSString *kSessionsKVCKey = @"sessions";
     [[self currentTab] numberOfSessionsDidChange];
     [self setDimmingForSession:targetSession];
     [sessionView updateDim];
+    newSession.tabColor = tabColor;
+    [self updateTabColors];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"iTermNumberOfSessionsDidChange" object: self userInfo: nil];
 }
 
@@ -4137,6 +4222,10 @@ NSString *kSessionsKVCKey = @"sessions";
             targetSession:[[self currentTab] activeSession]];
 }
 
+- (void)tabActiveSessionDidChange {
+    [[toolbelt_ commandHistoryView] updateCommands];
+}
+
 - (void)fitWindowToTabs
 {
     [self fitWindowToTabsExcludingTmuxTabs:NO];
@@ -4200,6 +4289,13 @@ NSString *kSessionsKVCKey = @"sessions";
     winSize.height += decorationSize.height;
     NSRect frame = [[self window] frame];
 
+    if ([self isEdgeWindow]) {
+        iTermApplicationDelegate *itad = (iTermApplicationDelegate *)[[iTermApplication sharedApplication] delegate];
+        if ([itad showToolbelt]) {
+            winSize.width += [self fullscreenToolbeltWidthForContentWidth:winSize.width] - 2.5;
+        }
+    }
+
     BOOL mustResizeTabs = NO;
     NSSize maxFrameSize = [self maxFrame].size;
     PtyLog(@"maxFrameSize=%@, screens=%@", [NSValue valueWithSize:maxFrameSize], [NSScreen screens]);
@@ -4238,38 +4334,62 @@ NSString *kSessionsKVCKey = @"sessions";
     NSUInteger savedMask = TABVIEW.autoresizingMask;
     TABVIEW.autoresizingMask = 0;
 
-    if (windowType_ == WINDOW_TYPE_TOP || windowType_ == WINDOW_TYPE_BOTTOM) {
-        frame.size.width = [[self window] frame].size.width;
-        frame.origin.x = [[self window] frame].origin.x;
-    }
-
-    if (windowType_ == WINDOW_TYPE_LEFT || windowType_ == WINDOW_TYPE_RIGHT) {
-        frame.size.height = self.screen.visibleFrame.size.height;
-
-        PTYSession* session = [self currentSession];
-        if (desiredColumns_ > 0) {
-            frame.size.width = MIN(winSize.width,
-                                   ceil([[session TEXTVIEW] charWidth] *
-                                        desiredColumns_) + decorationSize.width + 2 * MARGIN);
-        } else {
-            frame.size.width = winSize.width;
+    if (!edgeSpanningOff_) {
+        if (windowType_ == WINDOW_TYPE_TOP || windowType_ == WINDOW_TYPE_BOTTOM) {
+            frame.size.width = [[self window] frame].size.width;
+            frame.origin.x = [[self window] frame].origin.x;
         }
 
-    }
+        if (windowType_ == WINDOW_TYPE_LEFT || windowType_ == WINDOW_TYPE_RIGHT) {
+            frame.size.height = self.screen.visibleFrame.size.height;
 
-    if (windowType_ == WINDOW_TYPE_LEFT) {
-        frame.origin.x = [[self window] frame].origin.x;
-    } else if (windowType_ == WINDOW_TYPE_RIGHT) {
-        frame.origin.x = [[self window] frame].origin.x + [[self window] frame].size.width - frame.size.width;
-    }
+            PTYSession* session = [self currentSession];
+            if (desiredColumns_ > 0) {
+                frame.size.width = MIN(winSize.width,
+                                       ceil([[session TEXTVIEW] charWidth] *
+                                            desiredColumns_) + decorationSize.width + 2 * MARGIN);
+            } else {
+                frame.size.width = winSize.width;
+            }
 
-    // Set the origin again to the bottom of screen
-    if (windowType_ == WINDOW_TYPE_BOTTOM ||
-        windowType_ == WINDOW_TYPE_LEFT ||
-        windowType_ == WINDOW_TYPE_RIGHT) {
-        frame.origin.y = self.screen.visibleFrame.origin.y;
-    }
+        }
 
+        if (windowType_ == WINDOW_TYPE_LEFT) {
+            frame.origin.x = [[self window] frame].origin.x;
+        } else if (windowType_ == WINDOW_TYPE_RIGHT) {
+            frame.origin.x = [[self window] frame].origin.x + [[self window] frame].size.width - frame.size.width;
+        }
+
+        // Set the origin again to the bottom of screen
+        if (windowType_ == WINDOW_TYPE_BOTTOM ||
+            windowType_ == WINDOW_TYPE_LEFT ||
+            windowType_ == WINDOW_TYPE_RIGHT) {
+            frame.origin.y = self.screen.visibleFrame.origin.y;
+        }
+    } else {
+        double freeSpaceOnLeft;
+        double freeSpaceOnTop;
+        switch (windowType_) {
+            case WINDOW_TYPE_TOP:
+                frame.origin.y = self.screen.visibleFrame.origin.y + self.screen.visibleFrame.size.height - frame.size.height;
+                break;
+                
+            case WINDOW_TYPE_BOTTOM:
+                frame.origin.y = self.screen.visibleFrame.origin.y;
+                break;
+                
+            case WINDOW_TYPE_LEFT:
+                frame.origin.x = self.screen.visibleFrame.origin.x;
+                break;
+                
+            case WINDOW_TYPE_RIGHT:
+                frame.origin.x = self.screen.visibleFrame.origin.x + self.screen.visibleFrame.size.width - frame.size.width;
+                break;
+            default:
+                break;
+        }
+    }
+    
     BOOL didResize = NSEqualRects([[self window] frame], frame);
     [[self window] setFrame:frame display:YES];
 
@@ -4324,6 +4444,34 @@ NSString *kSessionsKVCKey = @"sessions";
     if (session) {
         [[self currentTab] setActiveSession:session];
     }
+}
+
+- (IBAction)movePaneDividerRight:(id)sender
+{
+    int width = [[[self currentSession] TEXTVIEW] charWidth];
+    [[self currentTab] moveCurrentSessionDividerBy:width
+                                      horizontally:YES];
+}
+
+- (IBAction)movePaneDividerLeft:(id)sender
+{
+    int width = [[[self currentSession] TEXTVIEW] charWidth];
+    [[self currentTab] moveCurrentSessionDividerBy:-width
+                                      horizontally:YES];
+}
+
+- (IBAction)movePaneDividerDown:(id)sender
+{
+    int height = [[[self currentSession] TEXTVIEW] lineHeight];
+    [[self currentTab] moveCurrentSessionDividerBy:height
+                                      horizontally:NO];
+}
+
+- (IBAction)movePaneDividerUp:(id)sender
+{
+    int height = [[[self currentSession] TEXTVIEW] lineHeight];
+    [[self currentTab] moveCurrentSessionDividerBy:-height
+                                      horizontally:NO];
 }
 
 - (IBAction)addNoteAtCursor:(id)sender {
@@ -5157,12 +5305,10 @@ NSString *kSessionsKVCKey = @"sessions";
         }
     }
 
-    if (windowType_ != WINDOW_TYPE_NORMAL || (!exitingLionFullscreen_ && [self anyFullScreen])) {
+    if ([self isEdgeWindow] || (!exitingLionFullscreen_ && [self anyFullScreen])) {
         iTermApplicationDelegate *itad = (iTermApplicationDelegate *)[[iTermApplication sharedApplication] delegate];
         if ([itad showToolbelt]) {
-            const CGFloat width = [self fullscreenToolbeltWidth];
-            [toolbelt_ setFrameOrigin:NSMakePoint(self.window.frame.size.width - width,
-                                                  0)];
+            [toolbelt_ setFrame:[self fullscreenToolbeltFrame]];
         }
     }
 
@@ -5571,6 +5717,22 @@ NSString *kSessionsKVCKey = @"sessions";
     return MIN(250, self.window.frame.size.width / 5);
 }
 
+- (CGFloat)fullscreenToolbeltWidthForContentWidth:(CGFloat)contentWidth {
+    // Returns the toolbelt frame for a window whose frame has a content view of size frameWidth.
+    // windowWidth = contentWidth + toolbeltWidth
+    // toolbeltWidth = MIN(250, windowWidth / 5)
+    // windowWidth = contentWidth + MIN(250, windowWidth / 5)
+    // windowWidth - MIN(250, windowWidth / 5) = contentWidth
+    // two cases:
+    // 1. windowWidth - windowWidth / 5 = contentWidth
+    //    0.8 * windowWidth = contentWidth
+    //    windowWidth = contentWidth / 0.8
+    //    toolbeltWidth = contentWidth / 4
+    // 2. windowWidth - 250 = contentWidth
+    //    toolbeltWidth = 250
+    return MIN(250, contentWidth / 4);
+}
+
 - (NSString *)currentSessionName
 {
     PTYSession* session = [self currentSession];
@@ -5737,6 +5899,27 @@ NSString *kSessionsKVCKey = @"sessions";
         }
     } else if ([item action] == @selector(resetCharset:)) {
         result = ![[[self currentSession] SCREEN] allCharacterSetPropertiesHaveDefaultValues];
+    } else if ([item action] == @selector(openCommandHistory:)) {
+        if (![[CommandHistory sharedInstance] commandHistoryHasEverBeenUsed]) {
+            return YES;
+        }
+        return [[CommandHistory sharedInstance] haveCommandsForHost:[[self currentSession] currentHost]];
+    } else if ([item action] == @selector(movePaneDividerDown:)) {
+        int height = [[[self currentSession] TEXTVIEW] lineHeight];
+        return [[self currentTab] canMoveCurrentSessionDividerBy:height
+                                                    horizontally:NO];
+    } else if ([item action] == @selector(movePaneDividerUp:)) {
+        int height = [[[self currentSession] TEXTVIEW] lineHeight];
+        return [[self currentTab] canMoveCurrentSessionDividerBy:-height
+                                                    horizontally:NO];
+    } else if ([item action] == @selector(movePaneDividerRight:)) {
+        int width = [[[self currentSession] TEXTVIEW] charWidth];
+        return [[self currentTab] canMoveCurrentSessionDividerBy:width
+                                                    horizontally:YES];
+    } else if ([item action] == @selector(movePaneDividerLeft:)) {
+        int width = [[[self currentSession] TEXTVIEW] charWidth];
+        return [[self currentTab] canMoveCurrentSessionDividerBy:-width
+                                                    horizontally:YES];
     }
     return result;
 }
@@ -5882,26 +6065,10 @@ NSString *kSessionsKVCKey = @"sessions";
 {
     ColorsMenuItemView *menuItem = (ColorsMenuItemView *)[sender view];
     NSColor *color = menuItem.color;
-    NSTabViewItem *aTabViewItem = [sender representedObject];
-    if (!aTabViewItem) {
-        aTabViewItem = [[self currentTab] tabViewItem];
-        if (!aTabViewItem) {
-            return;
-        }
+    for (PTYSession *aSession in [[self currentTab] sessions]) {
+        [aSession setTabColor:color];
     }
-    [tabBarControl setTabColor:color forTabViewItem:aTabViewItem];
-    if ([TABVIEW selectedTabViewItem] == aTabViewItem) {
-        NSColor* newTabColor = [tabBarControl tabColorForTabViewItem:aTabViewItem];
-        if ([TABVIEW numberOfTabViewItems] == 1 &&
-            [[PreferencePanel sharedInstance] hideTab] &&
-            newTabColor) {
-            [[self window] setBackgroundColor:newTabColor];
-            [background_ setColor:newTabColor];
-        } else {
-            [[self window] setBackgroundColor:nil];
-            [background_ setColor:normalBackgroundColor];
-        }
-    }
+    [self updateTabColors];
 }
 
 // Close this window.
@@ -5947,26 +6114,25 @@ NSString *kSessionsKVCKey = @"sessions";
 
 - (void)reloadBookmarks
 {
+    int j = 0;
     for (PTYSession* session in [self allSessions]) {
         Profile *oldBookmark = [session addressBookEntry];
         NSString* oldName = [oldBookmark objectForKey:KEY_NAME];
         [oldName retain];
         NSString* guid = [oldBookmark objectForKey:KEY_GUID];
-        Profile* newBookmark = [[ProfileModel sharedInstance] bookmarkWithGuid:guid];
-        if (!newBookmark) {
-            newBookmark = [[ProfileModel sessionsInstance] bookmarkWithGuid:guid];
-        }
-        if (newBookmark && newBookmark != oldBookmark) {
-            // Same guid but different pointer means it has changed.
-            // The test can have false positives but it should be harmless.
-            [session setPreferencesFromAddressBookEntry:newBookmark];
-            [session setAddressBookEntry:newBookmark];
+        if ([session reloadProfile]) {
             [[session tab] recheckBlur];
-            if (![[newBookmark objectForKey:KEY_NAME] isEqualToString:oldName]) {
+            NSDictionary *profile = [session addressBookEntry];
+            if (![[profile objectForKey:KEY_NAME] isEqualToString:oldName]) {
                 // Set name, which overrides any session-set icon name.
-                [session setName:[newBookmark objectForKey:KEY_NAME]];
+                [session setName:[profile objectForKey:KEY_NAME]];
                 // set default name, which will appear as a prefix if the session changes the name.
-                [session setDefaultName:[newBookmark objectForKey:KEY_NAME]];
+                [session setDefaultName:[profile objectForKey:KEY_NAME]];
+            }
+            if ([session isDivorced] &&
+                [[[PreferencePanel sessionsInstance] currentProfileGuid] isEqualToString:guid] &&
+                [[[PreferencePanel sessionsInstance] window] isVisible]) {
+                [[PreferencePanel sessionsInstance] updateBookmarkFields:profile];
             }
         }
         [oldName release];
@@ -6063,7 +6229,7 @@ NSString *kSessionsKVCKey = @"sessions";
 - (void)_updateToolbeltParentage
 {
     iTermApplicationDelegate *itad = (iTermApplicationDelegate *)[[iTermApplication sharedApplication] delegate];
-    if ([self anyFullScreen]) {
+    if ([self anyFullScreen] || [self isEdgeWindow]) {
         [toolbelt_ retain];
         [toolbelt_ removeFromSuperview];
         [toolbelt_ setFrame:[self fullscreenToolbeltFrame]];
@@ -6092,6 +6258,7 @@ NSString *kSessionsKVCKey = @"sessions";
             [drawer_ open];
         }
     }
+    [toolbelt_ relayoutAllTools];
 }
 
 - (NSUInteger)validModesForFontPanel:(NSFontPanel *)fontPanel
@@ -6114,6 +6281,12 @@ NSString *kSessionsKVCKey = @"sessions";
     ++count;
     [dockTile setBadgeLabel:[NSString stringWithFormat:@"%d", count]];
     [self.window.dockTile setShowsApplicationBadge:YES];
+}
+
+- (void)sessionHostDidChange:(PTYSession *)session to:(VT100RemoteHost *)host {
+    if ([self currentSession] == session) {
+      [[toolbelt_ commandHistoryView] updateCommands];
+    }
 }
 
 #pragma mark - KeyValueCoding
@@ -6579,6 +6752,9 @@ NSString *kSessionsKVCKey = @"sessions";
     }
     if (autocompleteView.delegate == session) {
         autocompleteView.delegate = nil;
+    }
+    if (commandHistoryPopup.delegate == session) {
+        commandHistoryPopup.delegate = nil;
     }
 }
 

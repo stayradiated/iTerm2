@@ -1,7 +1,12 @@
 #import <Cocoa/Cocoa.h>
 #import "PTYTextViewDataSource.h"
 
+@class VT100RemoteHost;
+
 @protocol VT100ScreenDelegate <NSObject>
+
+// Returns the session's unique ID.
+- (int)screenSessionID;
 
 // Screen contents have become dirty and should be redrawn right away.
 - (void)screenNeedsRedraw;
@@ -166,6 +171,11 @@
 // Show/hide the cursor.
 - (void)screenSetCursorVisible:(BOOL)visible;
 
+- (void)screenSetHighlightCursorLine:(BOOL)highlight;
+
+// Only called if the trackCursorLineMovement property is set.
+- (void)screenCursorDidMoveToLine:(int)line;
+
 // Returns if there is a view.
 - (BOOL)screenHasView;
 
@@ -203,11 +213,16 @@
 - (void)screenSetTabColorGreenComponentTo:(CGFloat)color;
 - (void)screenSetTabColorBlueComponentTo:(CGFloat)color;
 
+- (void)screenCurrentHostDidChange:(VT100RemoteHost *)host;
+
 // Ok to write to shell?
 - (BOOL)screenShouldSendReport;
 
 // FinalTerm stuff
 - (void)screenCommandDidChangeWithRange:(VT100GridCoordRange)range;
 - (void)screenCommandDidEndWithRange:(VT100GridCoordRange)range;
+
+@optional
+- (void)screenLogWorkingDirectoryAtLine:(long long)line withDirectory:(NSString *)directory;
 
 @end

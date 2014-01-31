@@ -30,6 +30,7 @@
 #import "SolidColorView.h"
 #import "ThreeFingerTapGestureRecognizer.h"
 #import "URLAction.h"
+#import "VT100ScreenMark.h"
 #import "VT100RemoteHost.h"
 #import "charmaps.h"
 #import "iTerm.h"
@@ -268,8 +269,6 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
     int accX;
     int accY;
     
-    BOOL advancedFontRendering;
-    double strokeThickness;
     double minimumContrast_;
     
     BOOL changedSinceLastExpose_;
@@ -398,12 +397,13 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
     // Used by _drawCursorTo: to remember the last time the cursor moved to avoid drawing a blinked-out
     // cursor while it's moving.
     NSTimeInterval lastTimeCursorMoved_;
-    
+
     // If set, the last-modified time of each line on the screen is shown on the right side of the display.
     BOOL showTimestamps_;
     float _antiAliasedShift;  // Amount to shift anti-aliased text by horizontally to simulate bold
     NSImage *markImage_;
-    
+    NSImage *markErrImage_;
+
     // Point clicked, valid only during -validateMenuItem and calls made from
     // the context menu and if x and y are nonnegative.
     VT100GridCoord validationClickPoint_;
@@ -522,8 +522,6 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
                                                      name:kHostnameLookupSucceeded
                                                    object:nil];
         
-        advancedFontRendering = [[PreferencePanel sharedInstance] advancedFontRendering];
-        strokeThickness = [[PreferencePanel sharedInstance] strokeThickness];
         imeOffset = 0;
         resultMap_ = [[NSMutableDictionary alloc] init];
 
@@ -554,6 +552,7 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
         }
         [self viewDidChangeBackingProperties];
         markImage_ = [NSImage imageNamed:@"mark"];
+        markErrImage_ = [NSImage imageNamed:@"mark_err"];
     }
     return self;
 }
@@ -1416,6 +1415,8 @@ NSMutableArray* screens=0;
 
     frameSize.height += VMARGIN;  // This causes a margin to be left at the top
     [[self superview] setFrameSize:frameSize];
+    
+    [_delegate textViewSizeDidChange];
 }
 
 - (void)scheduleSelectionScroll
@@ -2059,6 +2060,11 @@ NSMutableArray* screens=0;
     return [self updateDirtyRects] || [self _isCursorBlinking];
 }
 
+- (void)setNeedsDisplayOnLine:(int)line
+{
+    [self setNeedsDisplayOnLine:line inRange:VT100GridRangeMake(0, dataSource.width)];
+}
+
 // Overrides an NSView method.
 - (NSRect)adjustScroll:(NSRect)proposedVisibleRect
 {
@@ -2174,6 +2180,11 @@ NSMutableArray* screens=0;
     DLog(@"showCursor");
     [self markCursorDirty];
     CURSOR = YES;
+}
+
+- (BOOL)cursorIsVisible
+{
+    return CURSOR;
 }
 
 - (void)drawRect:(NSRect)rect
@@ -4119,7 +4130,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 
                 default:
                     // Not reporting mouse clicks, so we'll move the cursor since the remote app can't.
-                    if (!cmdPressed) {
+                    if (!cmdPressed && [_delegate textViewShouldPlaceCursor]) {
                         [self placeCursorOnCurrentLineWithEvent:event];
                     }
                     break;
@@ -4510,33 +4521,43 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     maxAt *= [dataSource width];
     maxAt += endX;
 
-    VT100GridCoord coord = VT100GridCoordMake(x, y);
-    ImageInfo *imageInfo = [self imageInfoAtCoord:coord];
-
-    if (!imageInfo &&
-        (startX < 0 ||
-         clickAt < minAt ||
-         clickAt >= maxAt)) {
-        int savedStartX = startX;
-        int savedStartY = startY;
-        int savedEndX = endX;
-        int savedEndY = endY;
-        // Didn't click on selection.
-        [self smartSelectWithEvent:event];
-        NSCharacterSet *nonWhiteSpaceSet = [[NSCharacterSet whitespaceAndNewlineCharacterSet] invertedSet];
-        NSString *text = [self selectedText];
-        if (!text ||
-            !text.length ||
-            [text rangeOfCharacterFromSet:nonWhiteSpaceSet].location == NSNotFound) {
-            // If all we selected was white space, undo it.
-            startX = savedStartX;
-            startY = savedStartY;
-            endX = savedEndX;
-            endY = savedEndY;
+    NSMenu *menu = nil;
+    if (x < MARGIN) {
+        VT100ScreenMark *mark = [dataSource markOnLine:y];
+        if (mark && mark.command.length) {
+            menu = [self menuForMark:mark directory:[dataSource workingDirectoryOnLine:y]];
         }
     }
-    [self setNeedsDisplay:YES];
-    NSMenu *menu = [self menuAtCoord:coord];
+
+    VT100GridCoord coord = VT100GridCoordMake(x, y);
+    if (!menu) {
+        ImageInfo *imageInfo = [self imageInfoAtCoord:coord];
+
+        if (!imageInfo &&
+            (startX < 0 ||
+             clickAt < minAt ||
+             clickAt >= maxAt)) {
+            int savedStartX = startX;
+            int savedStartY = startY;
+            int savedEndX = endX;
+            int savedEndY = endY;
+            // Didn't click on selection.
+            [self smartSelectWithEvent:event];
+            NSCharacterSet *nonWhiteSpaceSet = [[NSCharacterSet whitespaceAndNewlineCharacterSet] invertedSet];
+            NSString *text = [self selectedText];
+            if (!text ||
+                !text.length ||
+                [text rangeOfCharacterFromSet:nonWhiteSpaceSet].location == NSNotFound) {
+                // If all we selected was white space, undo it.
+                startX = savedStartX;
+                startY = savedStartY;
+                endX = savedEndX;
+                endY = savedEndY;
+            }
+        }
+        [self setNeedsDisplay:YES];
+        menu = [self menuAtCoord:coord];
+    }
     openingContextMenu_ = YES;
 
     // Slowly moving away from using NSPoint for integer coordinates.
@@ -5299,6 +5320,10 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     [_delegate textViewPasteFromSessionWithMostRecentSelection];
 }
 
+- (IBAction)pasteBase64Encoded:(id)sender {
+    [_delegate textViewPasteWithEncoding:kTextViewPasteEncodingBase64];
+}
+
 - (BOOL)_broadcastToggleable
 {
     // There used to be a restriction that you could not toggle broadcasting on
@@ -5366,6 +5391,12 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
         [item action] == @selector(openImage:) ||
         [item action] == @selector(inspectImage:)) {
         return YES;
+    }
+    if ([item action] == @selector(reRunCommand:)) {
+        return YES;
+    }
+    if ([item action] == @selector(pasteBase64Encoded:)) {
+        return [_delegate textViewCanPasteFile];
     }
 
     SEL theSel = [item action];
@@ -5609,6 +5640,44 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     } else {
         return nil;
     }
+}
+
+- (void)reRunCommand:(id)sender
+{
+    NSString *command = [sender representedObject];
+    [_delegate insertText:[command stringByAppendingString:@"\n"]];
+}
+
+- (NSMenu *)menuForMark:(VT100ScreenMark *)mark directory:(NSString *)directory
+{
+    NSMenu *theMenu;
+
+    // Allocate a menu
+    theMenu = [[NSMenu alloc] initWithTitle:@"Contextual Menu"];
+
+    NSMenuItem *theItem = [[[NSMenuItem alloc] init] autorelease];
+    theItem.title = [NSString stringWithFormat:@"Command: %@", mark.command];
+    [theMenu addItem:theItem];
+
+    if (directory) {
+        theItem = [[[NSMenuItem alloc] init] autorelease];
+        theItem.title = [NSString stringWithFormat:@"Directory: %@", directory];
+        [theMenu addItem:theItem];
+    }
+
+    theItem = [[[NSMenuItem alloc] init] autorelease];
+    theItem.title = [NSString stringWithFormat:@"Return code: %d", mark.code];
+    [theMenu addItem:theItem];
+
+    [theMenu addItem:[NSMenuItem separatorItem]];
+
+    theItem = [[[NSMenuItem alloc] initWithTitle:@"Re-run Command"
+                                          action:@selector(reRunCommand:)
+                                   keyEquivalent:@""] autorelease];
+    [theItem setRepresentedObject:mark.command];
+    [theMenu addItem:theItem];
+
+    return theMenu;
 }
 
 - (NSMenu *)menuAtCoord:(VT100GridCoord)coord
@@ -8233,6 +8302,25 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
         textOrigin = NSMakePoint(MARGIN + firstIndex * charWidth,
                                  yOrigin);
     }
+    
+    // Highlight cursor line
+    int cursorLine = [dataSource cursorY] - 1 + [dataSource numberOfScrollbackLines];
+    if (_highlightCursorLine && row == cursorLine) {
+        [[NSColor colorWithCalibratedRed:.65 green:.91 blue:1 alpha:.25] set];
+        NSRect rect = NSMakeRect(textOrigin.x,
+                                 textOrigin.y,
+                                 (lastIndex - firstIndex) * charWidth,
+                                 lineHeight);
+        NSRectFillUsingOperation(rect, NSCompositeSourceOver);
+        [[NSColor colorWithCalibratedRed:.65 green:.91 blue:1 alpha:.25] set];
+
+        rect.size.height = 1;
+        NSRectFillUsingOperation(rect, NSCompositeSourceOver);
+
+        rect.origin.y += lineHeight - 1;
+        NSRectFillUsingOperation(rect, NSCompositeSourceOver);
+    }
+
     [self _drawCharactersInLine:theLine
                             row:row
                         inRange:NSMakeRange(firstIndex, lastIndex - firstIndex)
@@ -8340,13 +8428,15 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     }
 
     // Indicate marks in margin --
-    if ([dataSource hasMarkOnLine:line]) {
+    VT100ScreenMark *mark = [dataSource markOnLine:line];
+    if (mark) {
+        NSImage *image = mark.code ? markErrImage_ : markImage_;
         CGFloat offset = (lineHeight - markImage_.size.height) / 2.0;
-        [markImage_ drawAtPoint:NSMakePoint(leftMargin.origin.x,
-                                            leftMargin.origin.y + offset)
-                       fromRect:NSMakeRect(0, 0, markImage_.size.width, markImage_.size.height)
-                      operation:NSCompositeSourceOver
-                       fraction:1.0];
+        [image drawAtPoint:NSMakePoint(leftMargin.origin.x,
+                                       leftMargin.origin.y + offset)
+                  fromRect:NSMakeRect(0, 0, markImage_.size.width, markImage_.size.height)
+                 operation:NSCompositeSourceOver
+                  fraction:1.0];
     }
     // Draw text and background --------------------------------------------------------------------
     // Contiguous sections of background with the same colour
@@ -10285,8 +10375,6 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 
 - (void)_settingsChanged:(NSNotification *)notification
 {
-    advancedFontRendering = [[PreferencePanel sharedInstance] advancedFontRendering];
-    strokeThickness = [[PreferencePanel sharedInstance] strokeThickness];
     [dimmedColorCache_ removeAllObjects];
     [self setNeedsDisplay:YES];
     [self setDimOnlyText:[[PreferencePanel sharedInstance] dimOnlyText]];
@@ -10385,10 +10473,15 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
         // Mark previous and current cursor position dirty
         DLog(@"Mark previous cursor position %d,%d dirty", prevCursorX, prevCursorY);
         int maxX = [dataSource width] - 1;
-        [dataSource setCharDirtyAtCursorX:MIN(maxX, prevCursorX) Y:prevCursorY];
-        DLog(@"Mark current cursor position %d,%d dirty", currentCursorX, currentCursorY);
-        [dataSource setCharDirtyAtCursorX:MIN(maxX, currentCursorX) Y:currentCursorY];
-
+        if (_highlightCursorLine) {
+            [dataSource setLineDirtyAtY:prevCursorY];
+            DLog(@"Mark current cursor line %d dirty", currentCursorY);
+            [dataSource setLineDirtyAtY:currentCursorY];
+        } else {
+            [dataSource setCharDirtyAtCursorX:MIN(maxX, prevCursorX) Y:prevCursorY];
+            DLog(@"Mark current cursor position %d,%d dirty", currentCursorX, currentCursorY);
+            [dataSource setCharDirtyAtCursorX:MIN(maxX, currentCursorX) Y:currentCursorY];
+        }
         // Set prevCursor[XY] to new cursor position
         prevCursorX = currentCursorX;
         prevCursorY = currentCursorY;

@@ -34,10 +34,17 @@ NSString * const kHighlightBackgroundColor = @"kHighlightBackgroundColor";
 static const double kInterBellQuietPeriod = 0.1;
 
 @implementation VT100Screen {
-    unichar inlineFileCode_;
-    NSMutableString *inlineFile_;
+    NSDictionary *inlineFileInfo_;  // Keys are kInlineFileXXX
     NSMutableArray *inlineFileCodes_;
 }
+
+static NSString *const kInlineFileName = @"name";  // NSString
+static NSString *const kInlineFileWidth = @"width";  // NSNumber
+static NSString *const kInlineFileWidthUnits = @"width units";  // NSNumber of VT100TerminalUnits
+static NSString *const kInlineFileHeight = @"height";  // NSNumber
+static NSString *const kInlineFileHeightUnits = @"height units"; // NSNumber of VT100TerminalUnits
+static NSString *const kInlineFilePreserveAspectRatio = @"preserve aspect ratio";  // NSNumber bool
+static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutableString
 
 @synthesize terminal = terminal_;
 @synthesize audibleBell = audibleBell_;
@@ -61,7 +68,7 @@ static const double kInterBellQuietPeriod = 0.1;
         terminal_ = [terminal retain];
         primaryGrid_ = [[VT100Grid alloc] initWithSize:VT100GridSizeMake(kDefaultScreenColumns,
                                                                          kDefaultScreenRows)
-                                              delegate:terminal];
+                                              delegate:self];
         currentGrid_ = primaryGrid_;
 
         maxScrollbackLines_ = kDefaultMaxScrollbackLines;
@@ -84,7 +91,7 @@ static const double kInterBellQuietPeriod = 0.1;
         findContext_ = [[FindContext alloc] init];
         savedIntervalTree_ = [[IntervalTree alloc] init];
         intervalTree_ = [[IntervalTree alloc] init];
-        markCache_ = [[NSMutableSet alloc] init];
+        markCache_ = [[NSMutableDictionary alloc] init];
         commandStartX_ = commandStartY_ = -1;
 
     }
@@ -104,7 +111,7 @@ static const double kInterBellQuietPeriod = 0.1;
     [findContext_ release];
     [intervalTree_ release];
     [markCache_ release];
-    [inlineFile_ release];
+    [inlineFileInfo_ release];
     for (NSNumber *code in inlineFileCodes_) {
         ReleaseImage([code intValue]);
     }
@@ -122,8 +129,8 @@ static const double kInterBellQuietPeriod = 0.1;
 - (void)setTerminal:(VT100Terminal *)terminal {
     [terminal_ autorelease];
     terminal_ = [terminal retain];
-    primaryGrid_.delegate = terminal;
-    altGrid_.delegate = terminal;
+    primaryGrid_.delegate = self;
+    altGrid_.delegate = self;
 }
 
 - (void)destructivelySetScreenWidth:(int)width height:(int)height
@@ -399,7 +406,7 @@ static const double kInterBellQuietPeriod = 0.1;
                               selectionEndPostionIsValid:&ok2
                                             inLineBuffer:appendOnlyLineBuffer
                                                 forRange:range];
-            NSLog(@"Add note on alt screen at %@ (position %@ to %@) to altScreenNotes",
+            DLog(@"Add note on alt screen at %@ (position %@ to %@) to altScreenNotes",
                   VT100GridCoordRangeDescription(range),
                   startPosition,
                   endPosition);
@@ -532,14 +539,14 @@ static const double kInterBellQuietPeriod = 0.1;
                                                          range:&newSelection
                                                   linesMovedUp:linesMovedUp];
         }
-        NSLog(@"Original limit=%@", originalLastPos);
-        NSLog(@"New limit=%@", newLastPos);
+        DLog(@"Original limit=%@", originalLastPos);
+        DLog(@"New limit=%@", newLastPos);
         for (NSArray *tuple in altScreenNotes) {
             id<IntervalTreeObject> note = tuple[0];
             LineBufferPosition *start = tuple[1];
             LineBufferPosition *end = tuple[2];
             VT100GridCoordRange newRange;
-            NSLog(@"  Note positions=%@ to %@", start, end);
+            DLog(@"  Note positions=%@ to %@", start, end);
             BOOL ok = [self computeRangeFromOriginalLimit:originalLastPos
                                             limitPosition:newLastPos
                                             startPosition:start
@@ -549,13 +556,13 @@ static const double kInterBellQuietPeriod = 0.1;
                                                     range:&newRange
                                              linesMovedUp:linesMovedUp];
             if (ok) {
-                NSLog(@"  New range=%@", VT100GridCoordRangeDescription(newRange));
+                DLog(@"  New range=%@", VT100GridCoordRangeDescription(newRange));
                 Interval *interval = [self intervalForGridCoordRange:newRange
                                                                width:new_width
                                                          linesOffset:[self totalScrollbackOverflow]];
                 [intervalTree_ addObject:note withInterval:interval];
             } else {
-                NSLog(@"  *FAILED TO CONVERT*");
+                DLog(@"  *FAILED TO CONVERT*");
             }
         }
     } else {
@@ -576,7 +583,7 @@ static const double kInterBellQuietPeriod = 0.1;
         IntervalTree *replacementTree = [[IntervalTree alloc] init];
         for (PTYNoteViewController *note in [savedIntervalTree_ allObjects]) {
             VT100GridCoordRange noteRange = [self coordRangeForInterval:note.entry.interval];
-            NSLog(@"Found note at %@", VT100GridCoordRangeDescription(noteRange));
+            DLog(@"Found note at %@", VT100GridCoordRangeDescription(noteRange));
             VT100GridCoordRange newRange;
             if ([self convertRange:noteRange toWidth:new_width to:&newRange inLineBuffer:altScreenLineBuffer]) {
                 // Anticipate the lines that will be dropped when the alt grid is restored.
@@ -586,7 +593,7 @@ static const double kInterBellQuietPeriod = 0.1;
                     newRange.start.y = 0;
                     newRange.start.x = 0;
                 }
-                NSLog(@"  Its new range is %@ including %d lines dropped from top", VT100GridCoordRangeDescription(noteRange), numLinesDroppedFromTop);
+                DLog(@"  Its new range is %@ including %d lines dropped from top", VT100GridCoordRangeDescription(noteRange), numLinesDroppedFromTop);
                 [savedIntervalTree_ removeObject:note];
                 if (newRange.end.y > 0 || (newRange.end.y == 0 && newRange.end.x > 0)) {
                     Interval *newInterval = [self intervalForGridCoordRange:newRange
@@ -594,7 +601,7 @@ static const double kInterBellQuietPeriod = 0.1;
                                                                 linesOffset:0];
                     [replacementTree addObject:note withInterval:newInterval];
                 } else {
-                    NSLog(@"Failed to convert");
+                    DLog(@"Failed to convert");
                 }
             }
         }
@@ -651,7 +658,8 @@ static const double kInterBellQuietPeriod = 0.1;
     for (id<IntervalTreeObject> obj in [intervalTree_ allObjects]) {
         if ([obj isKindOfClass:[VT100ScreenMark class]]) {
             VT100GridCoordRange range = [self coordRangeForInterval:obj.entry.interval];
-            [markCache_ addObject:@(totalScrollbackOverflow + range.end.y)];
+            VT100ScreenMark *mark = (VT100ScreenMark *)obj;
+            markCache_[@(totalScrollbackOverflow + range.end.y)] = mark;
         }
     }
 }
@@ -1145,6 +1153,15 @@ static const double kInterBellQuietPeriod = 0.1;
     }
 }
 
+- (void)setTrackCursorLineMovement:(BOOL)trackCursorLineMovement {
+    primaryGrid_.trackCursorLineMovement = trackCursorLineMovement;
+    altGrid_.trackCursorLineMovement = trackCursorLineMovement;
+}
+
+- (BOOL)trackCursorLineMovement {
+    return currentGrid_.trackCursorLineMovement;
+}
+
 #pragma mark - PTYTextViewDataSource
 
 // This is a wee hack until PTYTextView breaks its direct dependence on PTYSession
@@ -1399,6 +1416,13 @@ static const double kInterBellQuietPeriod = 0.1;
     currentGrid_.allDirty = NO;
 }
 
+- (void)setLineDirtyAtY:(int)y
+{
+    [currentGrid_ markCharsDirty:YES
+                      inRectFrom:VT100GridCoordMake(0, y)
+                              to:VT100GridCoordMake(self.width - 1, y)];
+}
+
 - (void)setCharDirtyAtCursorX:(int)x Y:(int)y
 {
     int xToMark = x;
@@ -1531,26 +1555,32 @@ static const double kInterBellQuietPeriod = 0.1;
     }
     if (workingDirectory.length) {
         workingDirectoryObj.workingDirectory = workingDirectory;
-        VT100GridCoordRange range = VT100GridCoordRangeMake(0, line, self.width, line);
+        VT100GridCoordRange range;
+        range = VT100GridCoordRangeMake(currentGrid_.cursorX, line, self.width, line);
         [intervalTree_ addObject:workingDirectoryObj
                     withInterval:[self intervalForGridCoordRange:range]];
     }
+    // This delegate call is for testing.
+    if ([delegate_ respondsToSelector:@selector(screenLogWorkingDirectoryAtLine:withDirectory:)]) {
+        [delegate_ screenLogWorkingDirectoryAtLine:line withDirectory:workingDirectory];
+    }
 }
 
-- (void)setRemoteHost:(NSString *)host user:(NSString *)user onLine:(int)line {
+- (VT100RemoteHost *)setRemoteHost:(NSString *)host user:(NSString *)user onLine:(int)line {
     VT100RemoteHost *remoteHostObj = [[[VT100RemoteHost alloc] init] autorelease];
     remoteHostObj.hostname = host;
     remoteHostObj.username = user;
     VT100GridCoordRange range = VT100GridCoordRangeMake(0, line, self.width, line);
     [intervalTree_ addObject:remoteHostObj
                 withInterval:[self intervalForGridCoordRange:range]];
+    return remoteHostObj;
 }
 
 - (id)objectOnOrBeforeLine:(int)line ofClass:(Class)cls {
     long long pos = [self intervalForGridCoordRange:VT100GridCoordRangeMake(0,
-                                                                            line,
+                                                                            line + 1,
                                                                             0,
-                                                                            line)].limit;
+                                                                            line + 1)].limit;
     NSEnumerator *enumerator = [intervalTree_ reverseLimitEnumeratorAt:pos];
     NSArray *objects;
     do {
@@ -1612,7 +1642,9 @@ static const double kInterBellQuietPeriod = 0.1;
         for (id<IntervalTreeObject> obj in [intervalTree_ objectsInInterval:deadInterval]) {
             if ([obj.entry.interval limit] <= lastDeadLocation) {
                 if ([obj isKindOfClass:[VT100ScreenMark class]]) {
-                    [markCache_ removeObject:@(totalScrollbackOverflow + [self coordRangeForInterval:obj.entry.interval].end.y)];
+                    long long theKey = (totalScrollbackOverflow +
+                                        [self coordRangeForInterval:obj.entry.interval].end.y);
+                    [markCache_ removeObjectForKey:@(theKey)];
                 }
                 [intervalTree_ removeObject:obj];
             }
@@ -1626,6 +1658,7 @@ static const double kInterBellQuietPeriod = 0.1;
 
 - (VT100ScreenMark *)addMarkStartingAtAbsoluteLine:(long long)line oneLine:(BOOL)oneLine {
     VT100ScreenMark *mark = [[[VT100ScreenMark alloc] init] autorelease];
+    mark.sessionID = [delegate_ screenSessionID];
     int nonAbsoluteLine = line - [self totalScrollbackOverflow];
     VT100GridCoordRange range;
     if (oneLine) {
@@ -1641,7 +1674,7 @@ static const double kInterBellQuietPeriod = 0.1;
                                         self.width,
                                         limit);
     }
-    [markCache_ addObject:@([self totalScrollbackOverflow] + range.end.y)];
+    markCache_[@([self totalScrollbackOverflow] + range.end.y)] = mark;
     [intervalTree_ addObject:mark withInterval:[self intervalForGridCoordRange:range]];
     [delegate_ screenNeedsRedraw];
     return mark;
@@ -1704,8 +1737,8 @@ static const double kInterBellQuietPeriod = 0.1;
     return nil;
 }
 
-- (BOOL)hasMarkOnLine:(int)line {
-    return [markCache_ containsObject:@([self totalScrollbackOverflow] + line)];
+- (VT100ScreenMark *)markOnLine:(int)line {
+  return markCache_[@([self totalScrollbackOverflow] + line)];
 }
 
 - (NSArray *)lastMarksOrNotes {
@@ -1750,6 +1783,15 @@ static const double kInterBellQuietPeriod = 0.1;
                                                [VT100ScreenMark class] ]];
     } while (objects && !objects.count);
     return objects;
+}
+
+- (BOOL)containsMark:(VT100ScreenMark *)mark {
+    for (id obj in [intervalTree_ objectsInInterval:mark.entry.interval]) {
+        if (obj == mark) {
+            return YES;
+        }
+    }
+    return NO;
 }
 
 - (VT100GridRange)lineNumberRangeOfInterval:(Interval *)interval {
@@ -2252,7 +2294,7 @@ static const double kInterBellQuietPeriod = 0.1;
         newTitle = [NSString stringWithFormat:@"%@: %@", [delegate_ screenNameExcludingJob], newTitle];
     }
     [delegate_ screenSetWindowTitle:newTitle];
-    
+
     // If you know to use RemoteHost then assume you also use CurrentDirectory. Innocent window title
     // changes shouldn't override CurrentDirectory.
     if (![self remoteHostOnLine:[self numberOfScrollbackLines] + self.height]) {
@@ -2521,15 +2563,15 @@ static const double kInterBellQuietPeriod = 0.1;
                                 screenOrigin,
                                 [self width],
                                 screenOrigin + self.height);
-    NSLog(@"  moveNotes: looking in range %@", VT100GridCoordRangeDescription(screenRange));
+    DLog(@"  moveNotes: looking in range %@", VT100GridCoordRangeDescription(screenRange));
     Interval *interval = [self intervalForGridCoordRange:screenRange];
     for (id<IntervalTreeObject> obj in [source objectsInInterval:interval]) {
         Interval *interval = [[obj.entry.interval retain] autorelease];
         [[obj retain] autorelease];
-        NSLog(@"  found note with interval %@", interval);
+        DLog(@"  found note with interval %@", interval);
         [source removeObject:obj];
         interval.location = interval.location + offset;
-        NSLog(@"  new interval is %@", interval);
+        DLog(@"  new interval is %@", interval);
         [dest addObject:obj withInterval:interval];
     }
 }
@@ -2544,12 +2586,12 @@ static const double kInterBellQuietPeriod = 0.1;
                                                                                1,
                                                                                historyLines)];
     IntervalTree *temp = [[IntervalTree alloc] init];
-    NSLog(@"swapNotes: moving onscreen notes into savedNotes");
+    DLog(@"swapNotes: moving onscreen notes into savedNotes");
     [self moveNotesOnScreenFrom:intervalTree_
                              to:temp
                          offset:-origin.location
                    screenOrigin:[self numberOfScrollbackLines]];
-    NSLog(@"swapNotes: moving onscreen savedNotes into notes");
+    DLog(@"swapNotes: moving onscreen savedNotes into notes");
     [self moveNotesOnScreenFrom:savedIntervalTree_
                              to:intervalTree_
                          offset:origin.location
@@ -2564,7 +2606,7 @@ static const double kInterBellQuietPeriod = 0.1;
         return;
     }
     if (!altGrid_) {
-        altGrid_ = [[VT100Grid alloc] initWithSize:primaryGrid_.size delegate:terminal_];
+        altGrid_ = [[VT100Grid alloc] initWithSize:primaryGrid_.size delegate:self];
     }
 
     primaryGrid_.savedDefaultChar = [primaryGrid_ defaultChar];
@@ -2619,6 +2661,7 @@ static const double kInterBellQuietPeriod = 0.1;
 
 - (void)terminalSetRemoteHost:(NSString *)remoteHost {
     NSRange atRange = [remoteHost rangeOfString:@"@"];
+    VT100RemoteHost *currentHost = [self remoteHostOnLine:[self numberOfLines]];
     NSString *user = nil;
     NSString *host = nil;
     if (atRange.length == 1) {
@@ -2636,7 +2679,11 @@ static const double kInterBellQuietPeriod = 0.1;
         }
     }
     int cursorLine = [self numberOfLines] - [self height] + currentGrid_.cursorY;
-    [self setRemoteHost:host user:user onLine:cursorLine];
+    VT100RemoteHost *remoteHostObj = [self setRemoteHost:host user:user onLine:cursorLine];
+    
+    if (![remoteHostObj isEqualToRemoteHost:currentHost]) {
+        [delegate_ screenCurrentHostDidChange:remoteHostObj];
+    }
 }
 
 - (void)terminalClearScreen {
@@ -2682,6 +2729,10 @@ static const double kInterBellQuietPeriod = 0.1;
 - (void)terminalStealFocus {
     [delegate_ screenActivateWindow];
     [delegate_ screenRaise:YES];
+}
+
+- (void)terminalClearScrollbackBuffer {
+    [self clearScrollbackBuffer];
 }
 
 - (void)terminalClearBuffer {
@@ -2754,10 +2805,90 @@ static const double kInterBellQuietPeriod = 0.1;
 - (void)terminalWillReceiveInlineFileNamed:(NSString *)name
                                     ofSize:(int)size
                                      width:(int)width
+                                     units:(VT100TerminalUnits)widthUnits
                                     height:(int)height
+                                     units:(VT100TerminalUnits)heightUnits
                        preserveAspectRatio:(BOOL)preserveAspectRatio {
-    if (height > 255 || width >= self.width) {
-        return;
+    [inlineFileInfo_ release];
+    inlineFileInfo_ = [@{ kInlineFileName: name,
+                          kInlineFileWidth: @(width),
+                          kInlineFileWidthUnits: @(widthUnits),
+                          kInlineFileHeight: @(height),
+                          kInlineFileHeightUnits: @(heightUnits),
+                          kInlineFilePreserveAspectRatio: @(preserveAspectRatio),
+                          kInlineFileBase64String: [NSMutableString string] } retain];
+}
+
+- (void)appendInlineFileCharsForName:(NSString *)name
+                               width:(int)width
+                               units:(VT100TerminalUnits)widthUnits
+                              height:(int)height
+                               units:(VT100TerminalUnits)heightUnits
+                 preserveAspectRatio:(BOOL)preserveAspectRatio
+                               image:(NSImage *)image {
+    if (!image) {
+        image = [NSImage imageNamed:@"broken_image"];
+    }
+
+    BOOL needsWidth = NO;
+    NSSize cellSize = [delegate_ screenCellSize];
+    switch (widthUnits) {
+        case kVT100TerminalUnitsPixels:
+            width = ceil((double)width / cellSize.width);
+            break;
+            
+        case kVT100TerminalUnitsCells:
+            break;
+            
+        case kVT100TerminalUnitsAuto:
+            if (heightUnits == kVT100TerminalUnitsAuto) {
+                width = ceil((double)image.size.width / cellSize.width);
+            } else {
+                needsWidth = YES;
+            }
+            break;
+    }
+    switch (heightUnits) {
+        case kVT100TerminalUnitsPixels:
+            height = ceil((double)height / cellSize.height);
+            break;
+            
+        case kVT100TerminalUnitsCells:
+            break;
+            
+        case kVT100TerminalUnitsAuto:
+            if (widthUnits == kVT100TerminalUnitsAuto) {
+                height = ceil((double)image.size.height / cellSize.height);
+            } else {
+                double aspectRatio = image.size.width / image.size.height;
+                height = ((double)(width * cellSize.width) / aspectRatio) / cellSize.height;
+            }
+            break;
+    }
+    
+    if (needsWidth) {
+        double aspectRatio = image.size.width / image.size.height;
+        width = ((double)(height * cellSize.height) * aspectRatio) / cellSize.width;
+    }
+    
+    width = MAX(1, width);
+    height = MAX(1, height);
+
+    double maxWidth = self.width - currentGrid_.cursorX;
+    // If the requested size is too large, scale it down to fit.
+    if (width > maxWidth) {
+        double scale = maxWidth / (double)width;
+        width = self.width;
+        height *= scale;
+    }
+    
+    // Height is capped at 255 because only 8 bits are used to represent the line number of a cell
+    // within the image.
+    double maxHeight = 255;
+    if (height > maxHeight) {
+        double scale = (double)height / maxHeight;
+        height = maxHeight;
+        width *= scale;
     }
 
     // Allocate cells for the image.
@@ -2774,28 +2905,33 @@ static const double kInterBellQuietPeriod = 0.1;
         }
         [self linefeed];
     }
+    currentGrid_.cursorX = currentGrid_.cursorX + width + 1;
     
-    inlineFileCode_ = c.code;
+    SetDecodedImage(c.code, image);
+    [inlineFileCodes_ addObject:@(c.code)];
 }
 
 - (void)terminalDidFinishReceivingFile {
-    if (inlineFileCode_) {
-        [self decodeInlineFile];
+    if (inlineFileInfo_) {
+        NSImage *image = [self imageWithBase64EncodedString:inlineFileInfo_[kInlineFileBase64String]];
+        [self appendInlineFileCharsForName:inlineFileInfo_[kInlineFileName]
+                                     width:[inlineFileInfo_[kInlineFileWidth] intValue]
+                                     units:(VT100TerminalUnits)[inlineFileInfo_[kInlineFileWidthUnits] intValue]
+                                    height:[inlineFileInfo_[kInlineFileHeight] intValue]
+                                     units:(VT100TerminalUnits)[inlineFileInfo_[kInlineFileHeightUnits] intValue]
+                       preserveAspectRatio:[inlineFileInfo_[kInlineFilePreserveAspectRatio] boolValue]
+                                     image:image];
         [delegate_ screenNeedsRedraw];
-        inlineFileCode_ = 0;
-        [inlineFile_ release];
-        inlineFile_ = nil;
+        [inlineFileInfo_ release];
+        inlineFileInfo_ = nil;
     } else {
         [delegate_ screenDidFinishReceivingFile];
     }
 }
 
 - (void)terminalDidReceiveBase64FileData:(NSString *)data {
-    if (inlineFileCode_) {
-        if (!inlineFile_) {
-            inlineFile_ = [[NSMutableString alloc] init];
-        }
-        [inlineFile_ appendString:data];
+    if (inlineFileInfo_) {
+        [inlineFileInfo_[kInlineFileBase64String] appendString:data];
     } else {
         [delegate_ screenDidReceiveBase64FileData:data];
     }
@@ -2881,6 +3017,10 @@ static const double kInterBellQuietPeriod = 0.1;
     [delegate_ screenSetCursorVisible:visible];
 }
 
+- (void)terminalSetHighlightCursorLine:(BOOL)highlight {
+    [delegate_ screenSetHighlightCursorLine:highlight];
+}
+
 - (void)terminalPromptDidStart; {
     // FinalTerm uses this to define the start of a collapsable region. That would be a nightmare
     // to add to iTerm, and our answer to this is marks, which already existed anyway.
@@ -2917,8 +3057,32 @@ static const double kInterBellQuietPeriod = 0.1;
     // TODO
 }
 
+- (VT100ScreenMark *)lastCommandMark {
+    NSEnumerator *enumerator = [intervalTree_ reverseLimitEnumerator];
+    NSArray *objects = [enumerator nextObject];
+    int numChecked = 0;
+    while (objects && numChecked < 50) {
+        for (id<IntervalTreeObject> obj in objects) {
+            if ([obj isKindOfClass:[VT100ScreenMark class]]) {
+                VT100ScreenMark *mark = (VT100ScreenMark *)obj;
+                if (mark.command) {
+                    return mark;
+                }
+            }
+            ++numChecked;
+        }
+        objects = [enumerator nextObject];
+    }
+    
+    return nil;
+}
+
 - (void)terminalReturnCodeOfLastCommandWas:(int)returnCode {
-    // TODO
+    VT100ScreenMark *mark = [self lastCommandMark];
+    if (mark) {
+        mark.code = returnCode;
+        [delegate_ screenNeedsRedraw];
+    }
 }
 
 - (void)terminalFinalTermCommand:(NSArray *)argv {
@@ -3523,32 +3687,23 @@ static void SwapInt(int *a, int *b) {
     return keepSearching;
 }
 
-- (void)decodeInlineFile {
+- (NSImage *)imageWithBase64EncodedString:(NSString *)string {
     // TODO: Handle objects other than images.
-    const char *buffer = [inlineFile_ UTF8String];
+    const char *buffer = [string UTF8String];
     int destLength = apr_base64_decode_len(buffer);
     if (destLength <= 0) {
-        goto error;
+        return nil;
     }
     
     NSMutableData *data = [NSMutableData dataWithLength:destLength];
     char *decodedBuffer = [data mutableBytes];
     int resultLength = apr_base64_decode(decodedBuffer, buffer);
     if (resultLength <= 0) {
-        goto error;
+        return nil;
     }
     
     NSImage *image = [[[NSImage alloc] initWithData:data] autorelease];
-    if (!image) {
-        goto error;
-    }
-    
-    SetDecodedImage(inlineFileCode_, image);
-    [inlineFileCodes_ addObject:@(inlineFileCode_)];
-    return;
-    
-error:
-    SetDecodedImage(inlineFileCode_, [NSImage imageNamed:@"broken_image"]);
+    return image;
 }
 
 
@@ -3566,6 +3721,32 @@ error:
 
 - (void)noteDidEndEditing:(PTYNoteViewController *)note {
     [delegate_ screenDidEndEditingNote];
+}
+
+#pragma mark - VT100GridDelegate
+
+- (BOOL)gridShouldUseWraparoundMode {
+    return [terminal_ wraparoundMode];
+}
+
+- (BOOL)gridShouldUseInsertMode {
+    return [terminal_ insertMode];
+}
+
+- (BOOL)gridShouldActLikeANSITerminal {
+    return [terminal_ isAnsi];
+}
+
+- (screen_char_t)gridForegroundColorCode {
+    return [terminal_ foregroundColorCodeReal];
+}
+
+- (screen_char_t)gridBackgroundColorCode {
+    return [terminal_ backgroundColorCodeReal];
+}
+
+- (void)gridCursorDidChangeLine {
+    [delegate_ screenCursorDidMoveToLine:currentGrid_.cursorY + [self numberOfScrollbackLines]];
 }
 
 @end

@@ -24,6 +24,7 @@ extern int kVT100ScreenMinRows;
 @interface VT100Screen : NSObject <
     PTYNoteViewControllerDelegate,
     PTYTextViewDataSource,
+    VT100GridDelegate,
     VT100TerminalDelegate>
 {
     NSMutableSet* tabStops_;
@@ -88,7 +89,7 @@ extern int kVT100ScreenMinRows;
     // to an id<IntervalTreeObject>, which is either PTYNoteViewController or VT100ScreenMark.
     IntervalTree *intervalTree_;
 
-    NSMutableSet *markCache_;  // Maps an absolute line number to a VT100ScreenMark.
+    NSMutableDictionary *markCache_;  // Maps an absolute line number to a VT100ScreenMark.
     VT100GridCoordRange markCacheRange_;
 
     // Location of the start of the current command, or -1 for none. Y is absolute.
@@ -110,6 +111,7 @@ extern int kVT100ScreenMinRows;
 @property(nonatomic, assign) BOOL saveToScrollbackInAlternateScreen;
 @property(nonatomic, retain) DVR *dvr;
 @property(nonatomic, readonly) VT100GridCoord savedCursor;
+@property(nonatomic, assign) BOOL trackCursorLineMovement;
 
 // Designated initializer.
 - (id)initWithTerminal:(VT100Terminal *)terminal;
@@ -193,9 +195,11 @@ extern int kVT100ScreenMinRows;
 - (NSArray *)firstMarksOrNotes;
 - (NSArray *)marksOrNotesBefore:(Interval *)location;
 - (NSArray *)marksOrNotesAfter:(Interval *)location;
+- (BOOL)containsMark:(VT100ScreenMark *)mark;
 
 - (void)setWorkingDirectory:(NSString *)workingDirectory onLine:(int)line;
 - (NSString *)workingDirectoryOnLine:(int)line;
 - (VT100RemoteHost *)remoteHostOnLine:(int)line;
+- (VT100ScreenMark *)lastCommandMark;  // last mark representing a command
 
 @end

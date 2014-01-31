@@ -28,6 +28,7 @@ extern NSString *const kPTYSessionTmuxFontDidChange;
 @class PTYTextView;
 @class PasteContext;
 @class PreferencePanel;
+@class VT100RemoteHost;
 @class VT100Screen;
 @class VT100Terminal;
 @class iTermController;
@@ -36,6 +37,8 @@ extern NSString *const kPTYSessionTmuxFontDidChange;
 // The time period for just blinking is in -[PreferencePanel timeBetweenBlinks].
 // Timer period when receiving lots of data.
 static const float kSlowTimerIntervalSec = 1.0 / 10.0;
+// Timer period for very small updates
+static const float kSuperFastTimerIntervalSec = 0.002;
 // Timer period for interactive use.
 static const float kFastTimerIntervalSec = 1.0 / 30.0;
 // Timer period for background sessions. This changes the tab item's color
@@ -61,6 +64,8 @@ typedef enum {
     VT100ScreenDelegate>
 
 @property(nonatomic, assign) BOOL alertOnNextMark;
+@property(nonatomic, readonly) int sessionID;
+@property(nonatomic, copy) NSColor *tabColor;
 
 // Return the current pasteboard value as a string.
 + (NSString*)pasteboardString;
@@ -136,6 +141,12 @@ typedef enum {
 // Preferences
 - (void)setPreferencesFromAddressBookEntry: (NSDictionary *)aePrefs;
 - (void)loadInitialColorTable;
+
+// Call this after the profile changed. If not divorced, the profile and
+// settings are updated. If divorced, changes are found in the session and
+// shared profiles and merged, updating this object's addressBookEntry and
+// overriddenFields.
+- (BOOL)reloadProfile;
 
 // PTYTask
 - (void)writeTask:(NSData*)data;
@@ -309,6 +320,7 @@ typedef enum {
 // affect it. Returns the GUID of a divorced bookmark. Does nothing if already
 // divorced, but still returns the divorced GUID.
 - (NSString*)divorceAddressBookEntryFromPreferences;
+- (BOOL)isDivorced;
 - (void)remarry;
 
 // Schedule the screen update timer to run in a specified number of seconds.
@@ -375,6 +387,9 @@ typedef enum {
 - (void)showHideNotes;
 - (void)previousMarkOrNote;
 - (void)nextMarkOrNote;
+- (void)scrollToMark:(VT100ScreenMark *)mark;
+
+- (VT100RemoteHost *)currentHost;
 
 // Select this session and tab and bring window to foreground.
 - (void)reveal;

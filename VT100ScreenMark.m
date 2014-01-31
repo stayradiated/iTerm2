@@ -11,9 +11,14 @@
 @implementation VT100ScreenMark
 @synthesize entry;
 
+- (void)dealloc {
+    [_command release];
+    [super dealloc];
+}
+
 - (NSString *)description {
-    return [NSString stringWithFormat:@"<%@: %p interval=%@>",
-            self.class, self, self.entry.interval];
+    return [NSString stringWithFormat:@"<%@: %p interval=%@ sessionID=%d>",
+            self.class, self, self.entry.interval, self.sessionID];
 }
 
 @end

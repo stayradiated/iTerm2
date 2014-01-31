@@ -7,6 +7,7 @@
 //
 
 #import "ToolbeltView.h"
+#import "ToolCommandHistoryView.h"
 #import "ToolProfiles.h"
 #import "ToolPasteHistory.h"
 #import "ToolWrapper.h"
@@ -60,6 +61,8 @@ static NSString *kToolbeltPrefKey = @"ToolbeltTools";
 + (void)initialize
 {
     gRegisteredTools = [[NSMutableDictionary alloc] init];
+    [ToolbeltView registerToolWithName:@"Command History"
+                             withClass:[ToolCommandHistoryView class]];
     [ToolbeltView registerToolWithName:@"Jobs" withClass:[ToolJobs class]];
     [ToolbeltView registerToolWithName:@"Notes" withClass:[ToolNotes class]];
     [ToolbeltView registerToolWithName:@"Paste History" withClass:[ToolPasteHistory class]];
@@ -131,10 +134,10 @@ static NSString *kToolbeltPrefKey = @"ToolbeltTools";
         NSString *theName = [[tools_ allKeys] objectAtIndex:0];
 
         ToolWrapper *wrapper = [tools_ objectForKey:theName];
-		if ([wrapper.tool respondsToSelector:@selector(shutdown)]) {
-			[wrapper.tool shutdown];
-		}
-		[wrapper setDelegate:nil];
+                if ([wrapper.tool respondsToSelector:@selector(shutdown)]) {
+                        [wrapper.tool shutdown];
+                }
+                [wrapper setDelegate:nil];
         [tools_ removeObjectForKey:theName];
         [[wrapper retain] autorelease];
         [wrapper removeToolSubviews];
@@ -164,7 +167,7 @@ static NSString *kToolbeltPrefKey = @"ToolbeltTools";
 
 - (void)toggleShowToolWithName:(NSString *)theName
 {
-	[ToolbeltView toggleShouldShowTool:theName];
+        [ToolbeltView toggleShouldShowTool:theName];
 }
 
 + (void)toggleShouldShowTool:(NSString *)theName
@@ -194,6 +197,48 @@ static NSString *kToolbeltPrefKey = @"ToolbeltTools";
     return [tools count];
 }
 
+- (void)forceSplitterSubviewsToRespectSizeConstraints
+{
+    NSArray *subviews = [splitter_ subviews];
+    CGFloat totalSlop = 0;
+    CGFloat totalDeficit = 0;
+    // Calculate the total amount of slop (height beyond the minimum) and deficit (height less than
+    // minimum) in all views.
+    for (int i = 0; i < subviews.count; i++) {
+        ToolWrapper *wrapper = subviews[i];
+        CGFloat excess = wrapper.frame.size.height - wrapper.minimumHeight;
+        if (excess < 0) {
+            totalDeficit -= excess;
+        } else {
+            totalSlop += excess;
+        }
+    }
+    if (totalDeficit > 0) {
+        // One or more views is under the minimum height. Steal a fraction from each view that is
+        // over the minimum.
+        double fractionOfSlopToRedistribute = MIN(1, totalDeficit / totalSlop);
+        CGFloat y = 0;
+        for (int i = 0; i < subviews.count; i++) {
+            ToolWrapper *wrapper = subviews[i];
+            NSRect frame = wrapper.frame;
+            CGFloat excess = wrapper.frame.size.height - wrapper.minimumHeight;
+            if (excess < 0) {
+                frame.size.height = wrapper.minimumHeight;
+            } else {
+                frame.size.height -= ceil(excess * fractionOfSlopToRedistribute);
+            }
+            frame.origin.y = y;
+            if (i == subviews.count - 1) {
+                // Last view always fills out the remainder. This takes care of accumulated rounding
+                // errors.
+                frame.size.height = splitter_.frame.size.height - y;
+            }
+            wrapper.frame = frame;
+            y += frame.size.height + [splitter_ dividerThickness];
+        }
+    }
+}
+
 - (void)toggleToolWithName:(NSString *)theName
 {
     ToolWrapper *wrapper = [tools_ objectForKey:theName];
@@ -201,10 +246,11 @@ static NSString *kToolbeltPrefKey = @"ToolbeltTools";
         [[wrapper tool] shutdown];
         [tools_ removeObjectForKey:theName];
         [wrapper removeFromSuperview];
-		[wrapper setDelegate:nil];
+        [wrapper setDelegate:nil];
     } else {
         [self addToolWithName:theName];
     }
+    [self forceSplitterSubviewsToRespectSizeConstraints];
 }
 
 - (BOOL)showingToolWithName:(NSString *)theName
@@ -237,13 +283,17 @@ static NSString *kToolbeltPrefKey = @"ToolbeltTools";
 
 - (void)addToolWithName:(NSString *)toolName
 {
+    if (![gRegisteredTools objectForKey:toolName]) {
+        // User could have a plist from a future version with a tool that doesn't exist here.
+        return;
+    }
     ToolWrapper *wrapper = [[[ToolWrapper alloc] initWithFrame:NSMakeRect(0,
                                                                           0,
                                                                           self.frame.size.width,
                                                                           self.frame.size.height / MAX(1, [ToolbeltView numberOfVisibleTools ] - 1))] autorelease];
     wrapper.name = toolName;
     wrapper.term = term_;
-	wrapper.delegate = self;
+        wrapper.delegate = self;
     Class c = [gRegisteredTools objectForKey:toolName];
     [self addTool:[[[c alloc] initWithFrame:NSMakeRect(0,
                                                        0,
@@ -263,12 +313,19 @@ static NSString *kToolbeltPrefKey = @"ToolbeltTools";
     // For KVO
 }
 
+- (void)relayoutAllTools
+{
+    for (ToolWrapper *wrapper in [splitter_ subviews]) {
+        [wrapper relayout];
+    }
+}
+
 #pragma mark - ToolWrapperDelegate
 
 - (void)hideToolbelt
 {
-	iTermApplicationDelegate *itad = [[iTermApplication sharedApplication] delegate];
-	[itad toggleToolbelt:self];
+        iTermApplicationDelegate *itad = [[iTermApplication sharedApplication] delegate];
+        [itad toggleToolbelt:self];
 }
 
 - (BOOL)haveOnlyOneTool
@@ -280,9 +337,58 @@ static NSString *kToolbeltPrefKey = @"ToolbeltTools";
 
 - (void)splitViewDidResizeSubviews:(NSNotification *)aNotification
 {
-    for (ToolWrapper *wrapper in [splitter_ subviews]) {
-        [wrapper relayout];
+    [self relayoutAllTools];
+}
+
+- (CGFloat)splitView:(NSSplitView *)splitView
+    constrainMinCoordinate:(CGFloat)proposedMinimumPosition
+         ofSubviewAt:(NSInteger)dividerIndex
+{
+    CGFloat min = 0;
+    NSArray *subviews = [splitter_ subviews];
+    for (int i = 0; i <= dividerIndex; i++) {
+        ToolWrapper *wrapper = subviews[i];
+        if (i == dividerIndex) {
+            min += wrapper.minimumHeight;
+        } else {
+            min += wrapper.frame.size.height;
+        }
+        if (i > 0) {
+            min += [splitView dividerThickness];
+        }
     }
+    return min;
+}
+
+- (CGFloat)splitView:(NSSplitView *)splitView
+    constrainMaxCoordinate:(CGFloat)proposedMaximumPosition
+         ofSubviewAt:(NSInteger)dividerIndex
+{
+    CGFloat height = splitView.frame.size.height;
+    NSArray *subviews = [splitter_ subviews];
+    for (int i = subviews.count - 1; i > dividerIndex; i--) {
+        ToolWrapper *wrapper = subviews[i];
+        if (i == dividerIndex + 1) {
+            height -= wrapper.minimumHeight;
+        } else {
+            height -= wrapper.frame.size.height;
+        }
+        if (i != subviews.count - 1) {
+            height -= [splitView dividerThickness];
+        }
+    }
+    return height;
+}
+
+- (void)splitView:(NSSplitView *)splitView resizeSubviewsWithOldSize:(NSSize)oldSize
+{
+    [splitView adjustSubviews];
+    [self forceSplitterSubviewsToRespectSizeConstraints];
+}
+
+- (ToolCommandHistoryView *)commandHistoryView {
+    ToolWrapper *wrapper = [tools_ objectForKey:@"Command History"];
+    return (ToolCommandHistoryView *)wrapper.tool;
 }
 
 @end

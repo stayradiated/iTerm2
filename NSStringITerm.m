@@ -28,6 +28,7 @@
 
 #define NSSTRINGJTERMINAL_CLASS_COMPILE
 #import "NSStringITerm.h"
+#import <apr-1/apr_base64.h>
 #import <wctype.h>
 
 #define AMB_CHAR_NUMBER (sizeof(ambiguous_chars) / sizeof(int))
@@ -656,6 +657,31 @@ int decode_utf8_char(const unsigned char *datap,
     }
   }
   return s;
+}
+
+- (NSString*)stringByTrimmingLeadingWhitespace {
+    int i = 0;
+
+    while ((i < self.length) &&
+           [[NSCharacterSet whitespaceCharacterSet] characterIsMember:[self characterAtIndex:i]]) {
+        i++;
+    }
+    return [self substringFromIndex:i];
+}
+
+- (NSString *)stringByBase64DecodingStringWithEncoding:(NSStringEncoding)encoding {
+    const char *buffer = [self UTF8String];
+    int destLength = apr_base64_decode_len(buffer);
+    if (destLength <= 0) {
+        return nil;
+    }
+    
+    NSMutableData *data = [NSMutableData dataWithLength:destLength];
+    char *decodedBuffer = [data mutableBytes];
+    int resultLength = apr_base64_decode(decodedBuffer, buffer);
+    return [[[NSString alloc] initWithBytes:decodedBuffer
+                                     length:resultLength
+                                   encoding:NSISOLatin1StringEncoding] autorelease];
 }
 
 @end

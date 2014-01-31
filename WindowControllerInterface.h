@@ -8,6 +8,7 @@
 @class PTYTabView;
 @class PTYTab;
 @class TmuxController;
+@class VT100RemoteHost;
 
 typedef enum {
     BROADCAST_OFF,
@@ -45,10 +46,7 @@ typedef enum {
 - (void)setLabelColor:(NSColor *)color forTabViewItem:tabViewItem;
 
 // Set background color for tab chrome.
-- (void)setTabColor:(NSColor *)color forTabViewItem:tabViewItem;
-
-// Returns the background color for tab chrome.
-- (NSColor*)tabColorForTabViewItem:(NSTabViewItem*)tabViewItem;
+- (void)updateTabColors;
 
 // Set blur radius for window.
 - (void)enableBlur:(double)radius;
@@ -199,6 +197,8 @@ typedef enum {
 // changing session sizes.
 - (void)fitWindowToTabs;
 
+- (void)tabActiveSessionDidChange;
+
 #pragma mark - Sessions
 
 // Set the session name. If theSessionName is nil then set it to the pathname
@@ -317,5 +317,7 @@ typedef enum {
 
 // Indicates if this the hotkey window.
 - (BOOL)isHotKeyWindow;
+
+- (void)sessionHostDidChange:(PTYSession *)session to:(VT100RemoteHost *)host;
 
 @end

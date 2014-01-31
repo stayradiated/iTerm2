@@ -8,28 +8,32 @@
 
 #import <Foundation/Foundation.h>
 
+extern NSString *const kCommandHistoryDidChangeNotificationName;
+
 @class VT100RemoteHost;
-
-@interface CommandHistoryEntry : NSObject
-
-// Full text of command.
-@property(nonatomic, copy) NSString *command;
-
-// Number of times used.
-@property(nonatomic, assign) int uses;
-
-// Time since reference date of last use.
-@property(nonatomic, assign) NSTimeInterval lastUsed;
-
-@end
+@class VT100ScreenMark;
 
 @interface CommandHistory : NSObject
 
 + (instancetype)sharedInstance;
 
-- (void)addCommand:(NSString *)command onHost:(VT100RemoteHost *)host;
++ (void)showInformationalMessage;
+
+- (BOOL)commandHistoryHasEverBeenUsed;
+
+- (void)addCommand:(NSString *)command
+            onHost:(VT100RemoteHost *)host
+       inDirectory:(NSString *)directory
+          withMark:(VT100ScreenMark *)mark;
 
 - (NSArray *)autocompleteSuggestionsWithPartialCommand:(NSString *)partialCommand
                                                 onHost:(VT100RemoteHost *)host;
+
+- (BOOL)haveCommandsForHost:(VT100RemoteHost *)host;
+
+// Expands each entry to one entry per use.
+- (NSArray *)entryArrayByExpandingAllUsesInEntryArray:(NSArray *)array;
+
+- (void)eraseHistory;
 
 @end

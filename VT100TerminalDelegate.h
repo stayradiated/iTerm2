@@ -24,6 +24,12 @@ typedef enum {
     kVT100TerminalSemanticTextTypeMax
 } VT100TerminalSemanticTextType;
 
+typedef enum {
+    kVT100TerminalUnitsCells,
+    kVT100TerminalUnitsPixels,
+    kVT100TerminalUnitsAuto,
+} VT100TerminalUnits;
+
 @protocol VT100TerminalDelegate
 // Append a string at the cursor's position and advance the cursor, scrolling if necessary. If
 // |ascii| is set then the string contains only ascii characters.
@@ -244,6 +250,9 @@ typedef enum {
 // Clears the screen, preserving the wrapped line the cursor is on.
 - (void)terminalClearScreen;
 
+// Erase scrollback history, leave screen alone.
+- (void)terminalClearScrollbackBuffer;
+
 // Not quite sure, kind of a mess right now. See comment in -[PTYSession setSendModifiers:].
 - (void)terminalSendModifiersDidChangeTo:(int *)modifiers
                                numValues:(int)numValues;
@@ -285,7 +294,9 @@ typedef enum {
 - (void)terminalWillReceiveInlineFileNamed:(NSString *)name
                                     ofSize:(int)size
                                      width:(int)width
+                                     units:(VT100TerminalUnits)widthUnits
                                     height:(int)height
+                                     units:(VT100TerminalUnits)heightUnits
                        preserveAspectRatio:(BOOL)preserveAspectRatio;
 
 // Download completed normally
@@ -325,6 +336,8 @@ typedef enum {
 
 // Shows/hides the cursor.
 - (void)terminalSetCursorVisible:(BOOL)visible;
+
+- (void)terminalSetHighlightCursorLine:(BOOL)highlight;
 
 // FinalTerm features
 - (void)terminalPromptDidStart;
