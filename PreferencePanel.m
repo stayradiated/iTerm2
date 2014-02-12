@@ -133,7 +133,9 @@ static NSString * const kRebuildColorPresetsMenuNotification = @"kRebuildColorPr
     
     // Hotkey opens dedicated window
     IBOutlet NSButton* hotkeyTogglesWindow;
+    IBOutlet NSButton* hotkeyAutoHides;
     BOOL defaultHotkeyTogglesWindow;
+    BOOL defaultHotkeyAutoHides;
     IBOutlet NSPopUpButton* hotkeyBookmark;
     NSString* defaultHotKeyBookmarkGuid;
     
@@ -475,6 +477,7 @@ static NSString * const kRebuildColorPresetsMenuNotification = @"kRebuildColorPr
     IBOutlet NSButton* xtermMouseReporting;
     IBOutlet NSButton* disableSmcupRmcup;
     IBOutlet NSButton* allowTitleReporting;
+    IBOutlet NSButton* allowTitleSetting;
     IBOutlet NSButton* disablePrinting;
     IBOutlet NSButton* scrollbackWithStatusBar;
     IBOutlet NSButton* scrollbackInAlternateScreen;
@@ -484,7 +487,6 @@ static NSString * const kRebuildColorPresetsMenuNotification = @"kRebuildColorPr
     IBOutlet NSComboBox* terminalType;
     IBOutlet NSPopUpButton* characterEncoding;
     IBOutlet NSButton* setLocaleVars;
-    IBOutlet NSButton* useCanonicalParser;
     
     // Keyboard tab
     IBOutlet NSTableView* keyMappings;
@@ -987,7 +989,8 @@ static NSString * const kRebuildColorPresetsMenuNotification = @"kRebuildColorPr
                sender == openTmuxWindows ||
                sender == threeFingerEmulatesMiddle ||
                sender == autoHideTmuxClientSession ||
-               sender == showWindowBorder) {
+               sender == showWindowBorder ||
+               sender == hotkeyAutoHides) {
         defaultWindowStyle = [windowStyle indexOfSelectedItem];
         defaultOpenTmuxWindowsIn = [[openTmuxWindows selectedItem] tag];
         defaultAutoHideTmuxClientSession = ([autoHideTmuxClientSession state] == NSOnState);
@@ -1007,6 +1010,7 @@ static NSString * const kRebuildColorPresetsMenuNotification = @"kRebuildColorPr
         defaultThreeFingerEmulatesMiddle=([threeFingerEmulatesMiddle state] == NSOnState);
         defaultHideScrollbar = ([hideScrollbar state] == NSOnState);
         defaultDisableFullscreenTransparency = ([disableFullscreenTransparency state] == NSOnState);
+        defaultHotkeyAutoHides = ([hotkeyAutoHides state] == NSOnState);
         [[NSNotificationCenter defaultCenter] postNotificationName:@"iTermRefreshTerminal"
                                                             object:nil
                                                           userInfo:nil];
@@ -1049,7 +1053,6 @@ static NSString * const kRebuildColorPresetsMenuNotification = @"kRebuildColorPr
                             nil,
                             nil);
         }
-
         defaultFsTabDelay = [fsTabDelay floatValue];
         defaultAllowClipboardAccess = ([allowClipboardAccessFromTerminal state]==NSOnState);
         defaultCopySelection = ([selectionCopiesText state]==NSOnState);
@@ -1118,6 +1121,7 @@ static NSString * const kRebuildColorPresetsMenuNotification = @"kRebuildColorPr
         [hotkeyField setEnabled:defaultHotkey];
         [hotkeyLabel setTextColor:defaultHotkey ? [NSColor blackColor] : [NSColor disabledControlTextColor]];
         [hotkeyTogglesWindow setEnabled:defaultHotkey];
+        [hotkeyAutoHides setEnabled:(defaultHotkey && defaultHotkeyTogglesWindow)];
         [hotkeyBookmark setEnabled:(defaultHotkey && defaultHotkeyTogglesWindow)];
 
         if (prefs &&
@@ -1470,6 +1474,7 @@ static NSString * const kRebuildColorPresetsMenuNotification = @"kRebuildColorPr
     [newDict setObject:[NSNumber numberWithBool:([xtermMouseReporting state]==NSOnState)] forKey:KEY_XTERM_MOUSE_REPORTING];
     [newDict setObject:[NSNumber numberWithBool:([disableSmcupRmcup state]==NSOnState)] forKey:KEY_DISABLE_SMCUP_RMCUP];
     [newDict setObject:[NSNumber numberWithBool:([allowTitleReporting state]==NSOnState)] forKey:KEY_ALLOW_TITLE_REPORTING];
+    [newDict setObject:[NSNumber numberWithBool:([allowTitleSetting state]==NSOnState)] forKey:KEY_ALLOW_TITLE_SETTING];
     [newDict setObject:[NSNumber numberWithBool:([disablePrinting state]==NSOnState)] forKey:KEY_DISABLE_PRINTING];
     [newDict setObject:[NSNumber numberWithBool:([scrollbackWithStatusBar state]==NSOnState)] forKey:KEY_SCROLLBACK_WITH_STATUS_BAR];
     [newDict setObject:[NSNumber numberWithBool:([scrollbackInAlternateScreen state]==NSOnState)] forKey:KEY_SCROLLBACK_IN_ALTERNATE_SCREEN];
@@ -1494,7 +1499,6 @@ static NSString * const kRebuildColorPresetsMenuNotification = @"kRebuildColorPr
     [newDict setObject:[terminalType stringValue] forKey:KEY_TERMINAL_TYPE];
     [newDict setObject:[NSNumber numberWithBool:([sendCodeWhenIdle state]==NSOnState)] forKey:KEY_SEND_CODE_WHEN_IDLE];
     [newDict setObject:[NSNumber numberWithInt:[idleCode intValue]] forKey:KEY_IDLE_CODE];
-    [newDict setObject:[NSNumber numberWithBool:([useCanonicalParser state]==NSOnState)] forKey:KEY_USE_CANONICAL_PARSER];
 
     // Keyboard tab
     [newDict setObject:[origBookmark objectForKey:KEY_KEYBOARD_MAP] forKey:KEY_KEYBOARD_MAP];
@@ -2968,6 +2972,7 @@ static NSString * const kRebuildColorPresetsMenuNotification = @"kRebuildColorPr
     defaultFocusFollowsMouse = [prefs objectForKey:@"FocusFollowsMouse"]?[[prefs objectForKey:@"FocusFollowsMouse"] boolValue]: NO;
     defaultTripleClickSelectsFullLines = [prefs objectForKey:@"TripleClickSelectsFullWrappedLines"] ? [[prefs objectForKey:@"TripleClickSelectsFullWrappedLines"] boolValue] : NO;
     defaultHotkeyTogglesWindow = [prefs objectForKey:@"HotKeyTogglesWindow"]?[[prefs objectForKey:@"HotKeyTogglesWindow"] boolValue]: NO;
+    defaultHotkeyAutoHides = [prefs objectForKey:@"HotkeyAutoHides"] ? [[prefs objectForKey:@"HotkeyAutoHides"] boolValue] : YES;
     defaultHotKeyBookmarkGuid = [[prefs objectForKey:@"HotKeyBookmark"] copy];
     defaultEnableBonjour = [prefs objectForKey:@"EnableRendezvous"]?[[prefs objectForKey:@"EnableRendezvous"] boolValue]: NO;
     defaultCmdSelection = [prefs objectForKey:@"CommandSelection"]?[[prefs objectForKey:@"CommandSelection"] boolValue]: YES;
@@ -3098,6 +3103,7 @@ static NSString * const kRebuildColorPresetsMenuNotification = @"kRebuildColorPr
     [prefs setBool:defaultFocusFollowsMouse forKey:@"FocusFollowsMouse"];
     [prefs setBool:defaultTripleClickSelectsFullLines forKey:@"TripleClickSelectsFullWrappedLines"];
     [prefs setBool:defaultHotkeyTogglesWindow forKey:@"HotKeyTogglesWindow"];
+    [prefs setBool:defaultHotkeyAutoHides forKey:@"HotkeyAutoHides"];
     [prefs setValue:defaultHotKeyBookmarkGuid forKey:@"HotKeyBookmark"];
     [prefs setBool:defaultEnableBonjour forKey:@"EnableRendezvous"];
     [prefs setBool:defaultCmdSelection forKey:@"CommandSelection"];
@@ -3335,6 +3341,7 @@ static NSString * const kRebuildColorPresetsMenuNotification = @"kRebuildColorPr
         KEY_XTERM_MOUSE_REPORTING,
         KEY_DISABLE_SMCUP_RMCUP,
         KEY_ALLOW_TITLE_REPORTING,
+        KEY_ALLOW_TITLE_SETTING,
         KEY_DISABLE_PRINTING,
         KEY_CHARACTER_ENCODING,
         KEY_SCROLLBACK_LINES,
@@ -3954,7 +3961,7 @@ static NSString * const kRebuildColorPresetsMenuNotification = @"kRebuildColorPr
     return [prefs objectForKey:@"HotkeyTermAnimationDuration"] ? [[prefs objectForKey:@"HotkeyTermAnimationDuration"] floatValue] : 0.25;
 }
 
-- (NSString *) searchCommand
+- (NSString *)searchCommand
 {
     assert(prefs);
     return [prefs objectForKey:@"SearchCommand"] ? [prefs objectForKey:@"SearchCommand"] : @"http://google.com/search?q=%@";
@@ -3963,6 +3970,11 @@ static NSString * const kRebuildColorPresetsMenuNotification = @"kRebuildColorPr
 - (BOOL)hotkeyTogglesWindow
 {
     return defaultHotkeyTogglesWindow;
+}
+
+- (BOOL)hotkeyAutoHides
+{
+    return defaultHotkeyAutoHides;
 }
 
 - (BOOL)dockIconTogglesWindow
@@ -3981,6 +3993,16 @@ static NSString * const kRebuildColorPresetsMenuNotification = @"kRebuildColorPr
         }
     }
     return timeBetweenBlinks;
+}
+
+- (BOOL)autoCommandHistory
+{
+    return [[NSUserDefaults standardUserDefaults] boolForKey:@"AutoCommandHistory"];
+}
+
+- (void)setAutoCommandHistory:(BOOL)value
+{
+    [[NSUserDefaults standardUserDefaults] setBool:value forKey:@"AutoCommandHistory"];
 }
 
 #pragma mark - URL Handler
@@ -4136,6 +4158,7 @@ static NSString * const kRebuildColorPresetsMenuNotification = @"kRebuildColorPr
     [focusFollowsMouse setState: defaultFocusFollowsMouse?NSOnState:NSOffState];
     [tripleClickSelectsFullLines setState:defaultTripleClickSelectsFullLines?NSOnState:NSOffState];
     [hotkeyTogglesWindow setState: defaultHotkeyTogglesWindow?NSOnState:NSOffState];
+    [hotkeyAutoHides setState: defaultHotkeyAutoHides?NSOnState:NSOffState];
     [self _populateHotKeyBookmarksMenu];
     [enableBonjour setState: defaultEnableBonjour?NSOnState:NSOffState];
     [cmdSelection setState: defaultCmdSelection?NSOnState:NSOffState];
@@ -4177,6 +4200,7 @@ static NSString * const kRebuildColorPresetsMenuNotification = @"kRebuildColorPr
     [hotkeyField setEnabled:defaultHotkey];
     [hotkeyLabel setTextColor:defaultHotkey ? [NSColor blackColor] : [NSColor disabledControlTextColor]];
     [hotkeyTogglesWindow setEnabled:defaultHotkey];
+    [hotkeyAutoHides setEnabled:(defaultHotkey && defaultHotkeyTogglesWindow)];
     [hotkeyBookmark setEnabled:(defaultHotkey && defaultHotkeyTogglesWindow)];
 
     [irMemory setIntValue:defaultIrMemory];
@@ -4573,6 +4597,11 @@ static NSString * const kRebuildColorPresetsMenuNotification = @"kRebuildColorPr
     [xtermMouseReporting setState:[[dict objectForKey:KEY_XTERM_MOUSE_REPORTING] boolValue] ? NSOnState : NSOffState];
     [disableSmcupRmcup setState:[[dict objectForKey:KEY_DISABLE_SMCUP_RMCUP] boolValue] ? NSOnState : NSOffState];
     [allowTitleReporting setState:[[dict objectForKey:KEY_ALLOW_TITLE_REPORTING] boolValue] ? NSOnState : NSOffState];
+    NSNumber *allowTitleSettingNumber = [dict objectForKey:KEY_ALLOW_TITLE_SETTING];
+    if (!allowTitleSettingNumber) {
+        allowTitleSettingNumber = @YES;
+    }
+    [allowTitleSetting setState:[allowTitleSettingNumber boolValue] ? NSOnState : NSOffState];
     [disablePrinting setState:[[dict objectForKey:KEY_DISABLE_PRINTING] boolValue] ? NSOnState : NSOffState];
     [scrollbackWithStatusBar setState:[[dict objectForKey:KEY_SCROLLBACK_WITH_STATUS_BAR] boolValue] ? NSOnState : NSOffState];
     [scrollbackInAlternateScreen setState:[dict objectForKey:KEY_SCROLLBACK_IN_ALTERNATE_SCREEN] ?
@@ -4594,7 +4623,6 @@ static NSString * const kRebuildColorPresetsMenuNotification = @"kRebuildColorPr
     [terminalType setStringValue:[dict objectForKey:KEY_TERMINAL_TYPE]];
     [sendCodeWhenIdle setState:[[dict objectForKey:KEY_SEND_CODE_WHEN_IDLE] boolValue] ? NSOnState : NSOffState];
     [idleCode setIntValue:[[dict objectForKey:KEY_IDLE_CODE] intValue]];
-    [useCanonicalParser setState:[[dict objectForKey:KEY_USE_CANONICAL_PARSER] boolValue] ? NSOnState : NSOffState];
 
     // Keyboard tab
     int rowIndex = [keyMappings selectedRow];

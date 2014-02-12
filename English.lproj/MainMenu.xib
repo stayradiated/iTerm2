@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
-<document type="com.apple.InterfaceBuilder3.Cocoa.XIB" version="3.0" toolsVersion="4514" systemVersion="13B42" targetRuntime="MacOSX.Cocoa" propertyAccessControl="none">
+<document type="com.apple.InterfaceBuilder3.Cocoa.XIB" version="3.0" toolsVersion="4514" systemVersion="13A2093" targetRuntime="MacOSX.Cocoa" propertyAccessControl="none">
     <dependencies>
         <deployment defaultVersion="1070" identifier="macosx"/>
         <plugIn identifier="com.apple.InterfaceBuilder.CocoaPlugin" version="4514"/>
@@ -117,6 +117,13 @@
                                 </connections>
                             </menuItem>
                             <menuItem isSeparatorItem="YES" id="1199"/>
+                            <menuItem title="Duplicate Tab" id="Heo-Xb-RKN">
+                                <modifierMask key="keyEquivalentModifierMask"/>
+                                <connections>
+                                    <action selector="duplicateTab:" target="-1" id="DcR-B7-VKj"/>
+                                </connections>
+                            </menuItem>
+                            <menuItem isSeparatorItem="YES" id="w1g-nK-kOV"/>
                             <menuItem title="Split Vertically with Current Profile" keyEquivalent="d" id="1200">
                                 <connections>
                                     <action selector="splitVertically:" target="-1" id="1202"/>
@@ -604,6 +611,12 @@ DQ
                             <menuItem title="Toggle Timestamps" keyEquivalent="E" id="TnF-kz-Lf0">
                                 <connections>
                                     <action selector="toggleShowTimestamps:" target="-1" id="oGg-h2-Ex7"/>
+                                </connections>
+                            </menuItem>
+                            <menuItem title="Automatic Command History" keyEquivalent="Y" id="9DF-nf-qif">
+                                <modifierMask key="keyEquivalentModifierMask" option="YES" command="YES"/>
+                                <connections>
+                                    <action selector="toggleAutoCommandHistory:" target="-1" id="asy-Rr-9Eu"/>
                                 </connections>
                             </menuItem>
                             <menuItem isSeparatorItem="YES" id="gzL-UV-S2y">

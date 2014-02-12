@@ -105,7 +105,6 @@ typedef enum {
 
     BOOL isAnsi_;
     BOOL disableSmcupRmcup_;
-    BOOL useCanonicalParser_;
 
     // Indexed by values in VT100TerminalTerminfoKeys. Gives strings to send for various special keys.
     char *keyStrings_[TERMINFO_KEYS];
@@ -125,6 +124,8 @@ typedef enum {
 - (void)setEncoding:(NSStringEncoding)encoding;
 
 - (void)putStreamData:(NSData*)data;
+- (void)putStreamData:(const char *)buffer length:(int)length;
+;
 
 // Returns true if a new token was parsed, false if there was nothing left to do.
 - (BOOL)parseNextToken;
@@ -174,7 +175,6 @@ typedef enum {
 - (NSData *)reportActivePositionWithX:(int)x Y:(int)y withQuestion:(BOOL)q;
 
 - (void)setDisableSmcupRmcup:(BOOL)value;
-- (void)setUseCanonicalParser:(BOOL)value;
 
 - (BOOL)bracketedPasteMode;
 

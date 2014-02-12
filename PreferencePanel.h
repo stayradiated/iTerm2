@@ -239,8 +239,11 @@ typedef enum {
 
 - (BOOL)remappingDisabledTemporarily;
 - (BOOL)hotkeyTogglesWindow;
+- (BOOL)hotkeyAutoHides;
 - (BOOL)dockIconTogglesWindow;
 - (NSTimeInterval)timeBetweenBlinks;
+- (BOOL)autoCommandHistory;
+- (void)setAutoCommandHistory:(BOOL)value;
 
 - (Profile*)hotkeyBookmark;
 

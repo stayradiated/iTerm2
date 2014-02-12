@@ -273,6 +273,8 @@ static int gNextSessionID = 1;
     VT100ScreenMark *lastMark_;
 
     VT100GridCoordRange commandRange_;
+    
+    NSTimeInterval lastUpdate_;
 }
 
 - (id)init
@@ -522,7 +524,10 @@ static int gNextSessionID = 1;
                                                             objectForKey:KEY_GUID]];
     BOOL needDivorce = NO;
     if (!theBookmark) {
-        theBookmark = [arrangement objectForKey:SESSION_ARRANGEMENT_BOOKMARK];
+        NSMutableDictionary *temp = [NSMutableDictionary dictionaryWithDictionary:[arrangement objectForKey:SESSION_ARRANGEMENT_BOOKMARK]];
+        // Keep it from stepping on an existing sesion with the same guid.
+        temp[KEY_GUID] = [ProfileModel freshGuid];
+        theBookmark = temp;
         needDivorce = YES;
     }
     [[aSession SCREEN] setUnlimitedScrollback:[[theBookmark objectForKey:KEY_UNLIMITED_SCROLLBACK] boolValue]];
@@ -1188,20 +1193,19 @@ static int gNextSessionID = 1;
     [self writeTaskImpl:data];
 }
 
-- (void)readTask:(NSData*)data
+- (void)readTask:(const char *)buffer length:(int)length
 {
-    if ([data length] == 0 || EXIT) {
+    if (length == 0 || EXIT) {
         return;
     }
     if ([SHELL hasMuteCoprocess]) {
         return;
     }
     if (gDebugLogging) {
-      const char* bytes = [data bytes];
-      int length = [data length];
-      DebugLog([NSString stringWithFormat:@"readTask called with %d bytes. The last byte is %d", (int)length, (int)bytes[length-1]]);
+      DebugLog([NSString stringWithFormat:@"readTask called with %d bytes. The last byte is %d", (int)length, (int)buffer[length-1]]);
     }
     if (tmuxMode_ == TMUX_GATEWAY) {
+        NSData *data = [NSData dataWithBytes:buffer length:length];
         if (tmuxLogging_) {
             [self printTmuxCommandOutputToScreen:[[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease]];
         }
@@ -1212,7 +1216,7 @@ static int gNextSessionID = 1;
         }
     }
 
-    [TERMINAL putStreamData:data];
+    [TERMINAL putStreamData:buffer length:length];
 
     // while loop to process all the tokens we can get
     while (!EXIT &&
@@ -1230,9 +1234,7 @@ static int gNextSessionID = 1;
     [updateDisplayUntil_ release];
     updateDisplayUntil_ = [[NSDate dateWithTimeIntervalSinceNow:10] retain];
     if ([[[self tab] parentWindow] currentTab] == [self tab]) {
-        if ([data length] < 16) {
-            [self scheduleUpdateIn:kSuperFastTimerIntervalSec];
-        } else if ([data length] < 1024) {
+        if (length < 1024) {
             [self scheduleUpdateIn:kFastTimerIntervalSec];
         } else {
             [self scheduleUpdateIn:kSlowTimerIntervalSec];
@@ -2105,10 +2107,11 @@ static int gNextSessionID = 1;
     [TERMINAL setDisableSmcupRmcup:[[aDict objectForKey:KEY_DISABLE_SMCUP_RMCUP] boolValue]];
     [SCREEN setAllowTitleReporting:[[aDict objectForKey:KEY_ALLOW_TITLE_REPORTING] boolValue]];
     [TERMINAL setAllowKeypadMode:[aDict boolValueDefaultingToYesForKey:KEY_APPLICATION_KEYPAD_ALLOWED]];
-    [TERMINAL setUseCanonicalParser:[[aDict objectForKey:KEY_USE_CANONICAL_PARSER] boolValue]];
     [SCREEN setUnlimitedScrollback:[[aDict objectForKey:KEY_UNLIMITED_SCROLLBACK] intValue]];
     [SCREEN setMaxScrollbackLines:[[aDict objectForKey:KEY_SCROLLBACK_LINES] intValue]];
 
+    SCREEN.appendToScrollbackWithStatusBar = [[aDict objectForKey:KEY_SCROLLBACK_WITH_STATUS_BAR] boolValue];
+    
     [self setFont:[ITAddressBookMgr fontWithDesc:[aDict objectForKey:KEY_NORMAL_FONT]]
            nafont:[ITAddressBookMgr fontWithDesc:[aDict objectForKey:KEY_NON_ASCII_FONT]]
         horizontalSpacing:[[aDict objectForKey:KEY_HORIZONTAL_SPACING] floatValue]
@@ -2808,6 +2811,7 @@ static int gNextSessionID = 1;
 
 - (void)setAddressBookEntry:(NSDictionary*)entry
 {
+    assert(entry);
     DLog(@"Set address book entry to one with guid %@", entry[KEY_GUID]);
     NSMutableDictionary *dict = [[entry mutableCopy] autorelease];
     // This is the most practical way to migrate the bopy of a
@@ -3005,7 +3009,11 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     [updateTimer invalidate];
     [updateTimer release];
 
-    updateTimer = [[NSTimer scheduledTimerWithTimeInterval:timeout
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    NSTimeInterval timeSinceLastUpdate = now - lastUpdate_;
+    lastUpdate_ = now;
+
+    updateTimer = [[NSTimer scheduledTimerWithTimeInterval:MAX(0, timeout - timeSinceLastUpdate)
                                                     target:self
                                                   selector:@selector(updateDisplay)
                                                   userInfo:[NSNumber numberWithFloat:(float)timeout]
@@ -3831,8 +3839,8 @@ static long long timeInTenthsOfSeconds(struct timeval t)
 - (void)tmuxReadTask:(NSData *)data
 {
     if (!EXIT) {
-        [SHELL logData:data];
-        [self readTask:data];
+        [SHELL logData:(const char *)[data bytes] length:[data length]];
+        [self readTask:(const char *)[data bytes] length:[data length]];
     }
 }
 
@@ -4589,6 +4597,12 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     return commandRange_.start.x < 0;
 }
 
+- (BOOL)textViewShouldDrawFilledInCursor {
+    // If the auto-command history popup is open for this session, the filled-in cursor should be
+    // drawn even though the textview isn't in the key window.
+    return [self textViewIsActiveSession] && [[[self tab] realParentWindow] autoCommandHistoryIsOpenForSession:self];
+}
+
 - (void)textViewWillNeedUpdateForBlink
 {
     [self scheduleUpdateIn:[[PreferencePanel sharedInstance] timeBetweenBlinks]];
@@ -5193,10 +5207,6 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     return [self doubleWidth];
 }
 
-- (BOOL)screenShouldAppendToScrollbackWithStatusBar {
-    return [[[self addressBookEntry] objectForKey:KEY_SCROLLBACK_WITH_STATUS_BAR] boolValue];
-}
-
 - (void)screenDidChangeNumberOfScrollbackLines {
     [TEXTVIEW updateNoteViewFrames];
 }
@@ -5583,7 +5593,22 @@ static long long timeInTenthsOfSeconds(struct timeval t)
                                                                                onHost:host];
 }
 - (void)screenCommandDidChangeWithRange:(VT100GridCoordRange)range {
+    BOOL hadCommand = commandRange_.start.x >= 0 && [[self commandInRange:commandRange_] length] > 0;
     commandRange_ = range;
+    BOOL haveCommand = commandRange_.start.x >= 0 && [[self commandInRange:commandRange_] length] > 0;
+    if (!haveCommand && hadCommand) {
+        DLog(@"Hide because don't have a command, but just had one");
+        [[[self tab] realParentWindow] hideAutoCommandHistoryForSession:self];
+    } else {
+        if (!hadCommand && range.start.x >= 0) {
+            DLog(@"Show because I have a range but didn't have a command");
+            [[[self tab] realParentWindow] showAutoCommandHistoryForSession:self];
+        }
+        NSString *command = haveCommand ? [self commandInRange:commandRange_] : @"";
+        DLog(@"Update command to %@", command);
+        [[[self tab] realParentWindow] updateAutoCommandHistoryForPrefix:command
+                                                               inSession:self];
+    }
 }
 
 - (void)screenCommandDidEndWithRange:(VT100GridCoordRange)range {
@@ -5599,6 +5624,17 @@ static long long timeInTenthsOfSeconds(struct timeval t)
                                            withMark:mark];
     }
     commandRange_ = VT100GridCoordRangeMake(-1, -1, -1, -1);
+    DLog(@"Hide ACH because command ended");
+    [[[self tab] realParentWindow] hideAutoCommandHistoryForSession:self];
+}
+
+- (BOOL)screenAllowTitleSetting {
+    NSNumber *n = addressBookEntry[KEY_ALLOW_TITLE_SETTING];
+    if (!n) {
+        return YES;
+    } else {
+        return [n boolValue];
+    }
 }
 
 #pragma mark - PopupDelegate
@@ -5619,6 +5655,28 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     [self insertText:string];
 }
 
+- (BOOL)popupKeyDown:(NSEvent *)event currentValue:(NSString *)value {
+    if ([[[self tab] realParentWindow] autoCommandHistoryIsOpenForSession:self]) {
+        unichar c = [[event characters] characterAtIndex:0];
+        if (c == 27) {
+            [[[self tab] realParentWindow] hideAutoCommandHistoryForSession:self];
+            return YES;
+        } else if (c == '\r') {
+            if ([value isEqualToString:[self currentCommand]]) {
+                // Send the enter key on.
+                [TEXTVIEW keyDown:event];
+                return YES;
+            } else {
+                return NO;  // select the row
+            }
+        } else {
+            [TEXTVIEW keyDown:event];
+            return YES;
+        }
+    } else {
+        return NO;
+    }
+}
 @end
 
 @implementation PTYSession (ScriptingSupport)

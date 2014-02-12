@@ -26,6 +26,9 @@
 // Returns if the profile name should be included in the window title.
 - (BOOL)screenShouldSyncTitle;
 
+// Terminal can change title
+- (BOOL)screenAllowTitleSetting;
+
 // Called after text was added to the current line. Can be used to check triggers.
 - (void)screenDidAppendStringToCurrentLine:(NSString *)string;
 
@@ -117,10 +120,6 @@
 
 // Returns if ambiguous characters are treated as fullwidth.
 - (BOOL)screenShouldTreatAmbiguousCharsAsDoubleWidth;
-
-// Returns if scrolling with a full-width scroll region abutting the top of the screen should append
-// to the line buffer.
-- (BOOL)screenShouldAppendToScrollbackWithStatusBar;
 
 // Number of scrollback lines changed.
 - (void)screenDidChangeNumberOfScrollbackLines;
