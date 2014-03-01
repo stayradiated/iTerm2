@@ -11,6 +11,7 @@
 
 @class CRunStorage;
 @class FindCursorView;
+@class iTermSelection;
 @class MovingAverage;
 @class PTYScrollView;
 @class PTYScroller;
@@ -34,14 +35,6 @@
 
 // Amount of time to highlight the cursor after beginFindCursor:YES
 static const double kFindCursorHoldTime = 1;
-enum {
-    SELECT_CHAR,
-    SELECT_WORD,
-    SELECT_LINE,
-    SELECT_SMART,
-    SELECT_BOX,
-    SELECT_WHOLE_LINE
-};
 
 // Types of characters. Used when classifying characters for word selection.
 typedef enum {
@@ -132,8 +125,63 @@ typedef enum {
   PointerControllerDelegate,
   TrouterDelegate>
 
+// Current selection
+@property(nonatomic, readonly) iTermSelection *selection;
+
 // Draw a highlight along the entire line the cursor is on.
 @property(nonatomic, assign) BOOL highlightCursorLine;
+
+// Use the non-ascii font? If not set, use the regular font for all characters.
+@property(nonatomic, assign) BOOL useNonAsciiFont;
+
+// Provider for screen contents, plus misc. other stuff.
+@property(nonatomic, assign) id<PTYTextViewDataSource> dataSource;
+
+// The delegate. Interfaces to the rest of the app for this view.
+@property(nonatomic, assign) id<PTYTextViewDelegate> delegate;
+
+// Array of dictionaries.
+@property(nonatomic, copy) NSArray *smartSelectionRules;
+
+// Intercell spacing as a proportion of cell size.
+@property(nonatomic, assign) double horizontalSpacing;
+@property(nonatomic, assign) double verticalSpacing;
+
+// Use a different font for bold, if available?
+@property(nonatomic, assign) BOOL useBoldFont;
+
+// Use a bright version of the text color for bold text?
+@property(nonatomic, assign) BOOL useBrightBold;
+
+// Ok to render italic text as italics?
+@property(nonatomic, assign) BOOL useItalicFont;
+
+// Should cursor blink?
+@property(nonatomic, assign) BOOL blinkingCursor;
+
+// Is blinking text drawn blinking?
+@property(nonatomic, assign) BOOL blinkAllowed;
+
+// Cursor type
+@property(nonatomic, assign) ITermCursorType cursorType;
+
+// When dimming inactive views, should only text be dimmed (not bg?)
+@property(nonatomic, assign) BOOL dimOnlyText;
+
+// Foreground color (the default color)
+@property(nonatomic, retain) NSColor *foregroundColor;
+
+// Background color (the default color)
+@property(nonatomic, retain) NSColor *backgroundColor;
+
+// Color for bold text
+@property(nonatomic, retain) NSColor *boldColor;
+
+// Color for selected background.
+@property(nonatomic, retain) NSColor *selectionColor;
+
+// Color for cursor background.
+@property(nonatomic, retain) NSColor *cursorColor;
 
 // Returns the mouse cursor to use when the mouse is in this view.
 + (NSCursor *)textViewCursor;
@@ -143,11 +191,6 @@ typedef enum {
 + (NSSize)charSizeForFont:(NSFont*)aFont
         horizontalSpacing:(double)hspace
           verticalSpacing:(double)vspace;
-
-- (id<PTYTextViewDataSource>)dataSource;
-- (void)setDataSource:(id<PTYTextViewDataSource>)aDataSource;
-- (id)delegate;
-- (void)setDelegate:(id)delegate;
 
 // Sets the "changed since last Exposé" flag to NO and returns its original value.
 - (BOOL)getAndResetChangedSinceLastExpose;
@@ -170,25 +213,14 @@ typedef enum {
 // a smart selection performed at (x, y).
 - (NSDictionary *)smartSelectAtX:(int)x
                                y:(int)y
-                        toStartX:(int*)X1
-                        toStartY:(int*)Y1
-                          toEndX:(int*)X2
-                          toEndY:(int*)Y2
+                              to:(VT100GridWindowedRange *)range
                 ignoringNewlines:(BOOL)ignoringNewlines
-                  actionRequired:(BOOL)actionRequred;
+                  actionRequired:(BOOL)actionRequred
+                 respectDividers:(BOOL)respectDividers;
 
 // Returns range modified by removing nulls (and possibly spaces) from its ends.
 - (VT100GridCoordRange)rangeByTrimmingNullsFromRange:(VT100GridCoordRange)range
                                           trimSpaces:(BOOL)trimSpaces;
-
-// Returns the content in a coord range.
-- (NSString *)contentFromX:(int)startx
-                         Y:(int)starty
-                       ToX:(int)nonInclusiveEndx
-                         Y:(int)endy
-                       pad:(BOOL)pad
-        includeLastNewline:(BOOL)includeLastNewline
-    trimTrailingWhitespace:(BOOL)trimSelectionTrailingSpaces;
 
 // Returns the currently selected text.
 - (NSString *)selectedText;
@@ -227,9 +259,6 @@ typedef enum {
 // Updates the preferences for semantic history.
 - (void)setTrouterPrefs:(NSDictionary *)prefs;
 
-// Updates the smart selection rules. Is an array of dictionaries.
-- (void)setSmartSelectionRules:(NSArray *)rules;
-
 // Various accessors (TODO: convert as many as possible into properties)
 - (NSFont *)font;
 - (NSFont *)nafont;
@@ -237,26 +266,10 @@ typedef enum {
          nafont:(NSFont *)naFont
     horizontalSpacing:(double)horizontalSpacing
     verticalSpacing:(double)verticalSpacing;
-- (double)horizontalSpacing;
-- (double)verticalSpacing;
 - (NSRect)scrollViewContentSize;
 - (void)setAntiAlias:(BOOL)asciiAA nonAscii:(BOOL)nonAsciiAA;
-- (void)setUseNonAsciiFont:(BOOL)useNonAsciiFont;
-- (BOOL)useBoldFont;
-- (void)setUseBoldFont:(BOOL)boldFlag;
-- (void)setUseBrightBold:(BOOL)flag;
-- (BOOL)useItalicFont;
-- (void)setUseItalicFont:(BOOL)italicFlag;
-- (BOOL)blinkingCursor;
-- (void)setBlinkingCursor:(BOOL)bFlag;
-- (void)setBlinkAllowed:(BOOL)value;
-- (void)setCursorType:(ITermCursorType)value;
-- (void)setDimOnlyText:(BOOL)value;
 
 // Color stuff
-- (NSColor*)defaultFGColor;
-- (NSColor*)defaultBGColor;
-- (NSColor*)defaultBoldColor;
 - (NSColor*)colorForCode:(int)theIndex
                    green:(int)green
                     blue:(int)blue
@@ -264,33 +277,19 @@ typedef enum {
                     bold:(BOOL)isBold
             isBackground:(BOOL)isBackground;
 - (NSColor*)colorFromRed:(int)red green:(int)green blue:(int)blue;
-- (NSColor*)selectionColor;
-- (NSColor*)defaultCursorColor;
-- (NSColor*)selectedTextColor;
-- (NSColor*)cursorTextColor;
-- (void)setFGColor:(NSColor*)color;
-- (void)setBGColor:(NSColor*)color;
-- (void)setBoldColor:(NSColor*)color;
 - (void)setColorTable:(int) theIndex color:(NSColor *) c;
-- (void)setSelectionColor:(NSColor *)aColor;
-- (void)setCursorColor:(NSColor*)color;
+
+- (NSColor*)selectedTextColor;
 - (void)setSelectedTextColor:(NSColor *)aColor;
+
+- (NSColor*)cursorTextColor;
 - (void)setCursorTextColor:(NSColor*)color;
+
 - (void)setSmartCursorColor:(BOOL)value;
 - (void)setMinimumContrast:(double)value;
 
 // Update the scroller color for light or dark backgrounds.
 - (void)updateScrollerForBackgroundColor;
-
-// Range of selection.
-- (int)selectionStartX;
-- (int)selectionStartY;
-
-// This is a half open interval as far as X is concerned. So an empty selection has the same start
-// and end coordinates.
-- (int)selectionEndX;
-- (int)selectionEndY;
-- (void)setSelectionFromX:(int)fromX fromY:(int)fromY toX:(int)toX toY:(int)toY;
 
 // Remove underline indicating clickable URL.
 - (void)removeUnderline;
@@ -406,19 +405,14 @@ typedef enum {
 // Returns the range of coords for the word at (x,y).
 - (NSString *)getWordForX:(int)x
                         y:(int)y
-                   startX:(int *)startx
-                   startY:(int *)starty
-                     endX:(int *)endx
-                     endY:(int *)endy;
+                    range:(VT100GridWindowedRange *)range
+          respectDividers:(BOOL)respectDividers;
 
 // Draws a dotted outline (or just the top of the outline) if there is a maximized pane.
 - (void)drawOutlineInRect:(NSRect)rect topOnly:(BOOL)topOnly;
 
 // Add a search result for highlighting in yellow.
-- (void)addResultFromX:(int)resStartX
-                  absY:(long long)absStartY
-                   toX:(int)resEndX
-                toAbsY:(long long)absEndY;
+- (void)addSearchResult:(SearchResult *)searchResult;
 
 // When a new note is created, call this to add a view for it.
 - (void)addViewForNote:(PTYNoteViewController *)note;

@@ -41,7 +41,8 @@
 #import "iTermController.h"
 #import "iTermGrowlDelegate.h"
 #import "iTermKeyBindingMgr.h"
-
+#import "iTermSelection.h"
+#import "iTermTextExtractor.h"
 #import <apr-1/apr_base64.h>
 #include <stdlib.h>
 #include <sys/time.h>
@@ -2529,7 +2530,7 @@ static int gNextSessionID = 1;
 
 - (NSColor *)foregroundColor
 {
-    return [TEXTVIEW defaultFGColor];
+    return [TEXTVIEW foregroundColor];
 }
 
 - (void)setForegroundColor:(NSColor*)color
@@ -2538,16 +2539,16 @@ static int gNextSessionID = 1;
         return;
     }
 
-    if (([TEXTVIEW defaultFGColor] != color) ||
-       ([[TEXTVIEW defaultFGColor] alphaComponent] != [color alphaComponent])) {
+    if (([TEXTVIEW foregroundColor] != color) ||
+       ([[TEXTVIEW foregroundColor] alphaComponent] != [color alphaComponent])) {
         // Change the fg color for future stuff
-        [TEXTVIEW setFGColor:color];
+        [TEXTVIEW setForegroundColor:color];
     }
 }
 
 - (NSColor *)backgroundColor
 {
-    return [TEXTVIEW defaultBGColor];
+    return [TEXTVIEW backgroundColor];
 }
 
 - (void)setBackgroundColor:(NSColor*) color {
@@ -2555,18 +2556,18 @@ static int gNextSessionID = 1;
         return;
     }
 
-    if (([TEXTVIEW defaultBGColor] != color) ||
-        ([[TEXTVIEW defaultBGColor] alphaComponent] != [color alphaComponent])) {
+    if (([TEXTVIEW backgroundColor] != color) ||
+        ([[TEXTVIEW backgroundColor] alphaComponent] != [color alphaComponent])) {
         // Change the bg color for future stuff
-        [TEXTVIEW setBGColor:color];
+        [TEXTVIEW setBackgroundColor:color];
     }
 
     [[self SCROLLVIEW] setBackgroundColor:color];
 }
 
-- (NSColor *) boldColor
+- (NSColor *)boldColor
 {
-    return [TEXTVIEW defaultBoldColor];
+    return [TEXTVIEW boldColor];
 }
 
 - (void)setBoldColor:(NSColor*)color
@@ -2576,7 +2577,7 @@ static int gNextSessionID = 1;
 
 - (NSColor *)cursorColor
 {
-    return [TEXTVIEW defaultCursorColor];
+    return [TEXTVIEW cursorColor];
 }
 
 - (void)setCursorColor:(NSColor*)color
@@ -3616,20 +3617,14 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     if (coord.x < 0 || coord.y < 0 || coord.x >= SCREEN.width || coord.y >= SCREEN.height) {
         return VT100GridCoordRangeMake(0, 0, 0, 0);
     }
-    int startX, startY, endX, endY;
+    VT100GridWindowedRange range;
     [TEXTVIEW smartSelectAtX:coord.x
                            y:coord.y + [SCREEN numberOfScrollbackLines]
-                    toStartX:&startX
-                    toStartY:&startY
-                      toEndX:&endX
-                      toEndY:&endY
+                          to:&range
             ignoringNewlines:NO
-              actionRequired:NO];
-    return [TEXTVIEW rangeByTrimmingNullsFromRange:VT100GridCoordRangeMake(startX,
-                                                                           startY,
-                                                                           endX,
-                                                                           endY)
-                                        trimSpaces:YES];
+              actionRequired:NO
+             respectDividers:YES];
+    return [TEXTVIEW rangeByTrimmingNullsFromRange:range.coordRange trimSpaces:YES];
 }
 
 - (void)addNoteAtCursor {
@@ -4674,7 +4669,7 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     PTYSession *session = [[iTermController sharedInstance] sessionWithMostRecentSelection];
     if (session) {
         PTYTextView *textview = [session TEXTVIEW];
-        if ([textview selectionStartX] > -1) {
+        if ([textview isAnyCharSelected]) {
             [self pasteString:[textview selectedText]];
         }
     }
@@ -4741,7 +4736,13 @@ static long long timeInTenthsOfSeconds(struct timeval t)
 }
 
 - (BOOL)textViewInSameTabAsTextView:(PTYTextView *)other {
-    return [self tab] == [other.delegate tab];
+    PTYTab *myTab = [self tab];
+    for (PTYSession *session in [myTab sessions]) {
+        if ([session TEXTVIEW] == other) {
+            return YES;
+        }
+    }
+    return NO;
 }
 
 - (BOOL)textViewIsActiveSession
@@ -4907,10 +4908,7 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     more = [SCREEN continueFindAllResults:results
                                 inContext:tailFindContext_];
     for (SearchResult *r in results) {
-        [TEXTVIEW addResultFromX:r->startX
-                            absY:r->absStartY
-                             toX:r->endX
-                          toAbsY:r->absEndY];
+        [TEXTVIEW addSearchResult:r];
     }
     if ([results count]) {
         [TEXTVIEW setNeedsDisplay:YES];
@@ -5231,27 +5229,8 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     [TEXTVIEW deselect];
 }
 
-- (int)screenSelectionStartX {
-    return [TEXTVIEW selectionStartX];
-}
-
-- (int)screenSelectionEndX {
-    return [TEXTVIEW selectionEndX];
-}
-
-- (int)screenSelectionStartY {
-    return [TEXTVIEW selectionStartY];
-}
-
-- (int)screenSelectionEndY {
-    return [TEXTVIEW selectionEndY];
-}
-
-- (void)screenSetSelectionFromX:(int)startX
-                          fromY:(int)startY
-                            toX:(int)endX
-                            toY:(int)endY {
-    [TEXTVIEW setSelectionFromX:startX fromY:startY toX:endX toY:endY];
+- (iTermSelection *)screenSelection {
+    return TEXTVIEW.selection;
 }
 
 - (NSSize)screenCellSize {
@@ -5457,11 +5436,11 @@ static long long timeInTenthsOfSeconds(struct timeval t)
 }
 
 - (void)screenSetForegroundColor:(NSColor *)color {
-    [TEXTVIEW setFGColor:color];
+    [TEXTVIEW setForegroundColor:color];
 }
 
 - (void)screenSetBackgroundColor:(NSColor *)color {
-    [TEXTVIEW setBGColor:color];
+    [TEXTVIEW setBackgroundColor:color];
 }
 
 - (void)screenSetBoldColor:(NSColor *)color {
@@ -5556,13 +5535,15 @@ static long long timeInTenthsOfSeconds(struct timeval t)
 
 // FinalTerm
 - (NSString *)commandInRange:(VT100GridCoordRange)range {
-    NSString *command = [TEXTVIEW contentFromX:range.start.x
-                                             Y:range.start.y
-                                           ToX:range.end.x
-                                             Y:range.end.y
-                                           pad:NO
-                            includeLastNewline:NO
-                        trimTrailingWhitespace:NO];
+    if (range.start.x == -1) {
+        return nil;
+    }
+    iTermTextExtractor *extractor = [iTermTextExtractor textExtractorWithDataSource:SCREEN];
+    NSString *command = [extractor contentInRange:VT100GridWindowedRangeMake(range, 0, 0)
+                                              pad:NO
+                               includeLastNewline:NO
+                           trimTrailingWhitespace:NO
+                                     cappedAtSize:-1];
     NSRange newline = [command rangeOfString:@"\n"];
     if (newline.location != NSNotFound) {
         command = [command substringToIndex:newline.location];
@@ -5613,15 +5594,17 @@ static long long timeInTenthsOfSeconds(struct timeval t)
 
 - (void)screenCommandDidEndWithRange:(VT100GridCoordRange)range {
     NSString *command = [self commandInRange:range];
-    NSString *trimmedCommand =
-        [command stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-    if (trimmedCommand.length) {
-        VT100ScreenMark *mark = [SCREEN markOnLine:range.start.y];
-        mark.command = command;
-        [[CommandHistory sharedInstance] addCommand:trimmedCommand
-                                             onHost:[SCREEN remoteHostOnLine:range.end.y]
-                                        inDirectory:[SCREEN workingDirectoryOnLine:range.end.y]
-                                           withMark:mark];
+    if (command) {
+        NSString *trimmedCommand =
+            [command stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (trimmedCommand.length) {
+            VT100ScreenMark *mark = [SCREEN markOnLine:range.start.y];
+            mark.command = command;
+            [[CommandHistory sharedInstance] addCommand:trimmedCommand
+                                                 onHost:[SCREEN remoteHostOnLine:range.end.y]
+                                            inDirectory:[SCREEN workingDirectoryOnLine:range.end.y]
+                                               withMark:mark];
+        }
     }
     commandRange_ = VT100GridCoordRangeMake(-1, -1, -1, -1);
     DLog(@"Hide ACH because command ended");
