@@ -536,7 +536,7 @@
     theCopy->_initialRange = _initialRange;
     theCopy->_live = _live;
     theCopy->_extend = _extend;
-    theCopy->_subSelections = [_subSelections mutableCopy];
+    [theCopy->_subSelections addObjectsFromArray:_subSelections];
     theCopy->_resumable = _resumable;
     
     theCopy.delegate = _delegate;
@@ -772,7 +772,6 @@
     }
 
     // Slow path.
-    NSArray *subs = [self allSubSelections];
     NSMutableIndexSet *indexes = [NSMutableIndexSet indexSet];
     for (iTermSubSelection *sub in [self allSubSelections]) {
         VT100GridWindowedRange range = sub.range;

@@ -128,16 +128,16 @@ static NSError *SCPFileError(NSString *description) {
     
     // Check if the host is {hostname}:{port} or {IPv4}:{port}
     if (components == 2) {
-        NSNumberFormatter *formatter = [[NSNumberFormatter alloc] init];
-        [formatter setLocale:[[NSLocale alloc] initWithLocaleIdentifier:@"en_US"]];
+        NSNumberFormatter *formatter = [[[NSNumberFormatter alloc] init] autorelease];
+        [formatter setLocale:[[[NSLocale alloc] initWithLocaleIdentifier:@"en_US"] autorelease]];
         
         return [[formatter numberFromString:[hostComponents lastObject]] intValue];
     } else if (components >= 4 &&
                [hostComponents[0] hasPrefix:@"["] &&
                [hostComponents[components-2] hasSuffix:@"]"]) {
         // Check if the host is [{IPv6}]:{port}
-        NSNumberFormatter *formatter = [[NSNumberFormatter alloc] init];
-        [formatter setLocale:[[NSLocale alloc] initWithLocaleIdentifier:@"en_US"]];
+        NSNumberFormatter *formatter = [[[NSNumberFormatter alloc] init] autorelease];
+        [formatter setLocale:[[[NSLocale alloc] initWithLocaleIdentifier:@"en_US"] autorelease]];
         
         return [[formatter numberFromString:[hostComponents lastObject]] intValue];
     }
@@ -241,8 +241,7 @@ static NSError *SCPFileError(NSString *description) {
                                                                  keyboardInteractivePrompt:@"Passphrase for private key:"];
                     });
                 }
-                // Try an empty passphrase first
-                BOOL ok = [self.session authenticateByPublicKey:[kPublicKeyPath stringByExpandingTildeInPath]
+                [self.session authenticateByPublicKey:[kPublicKeyPath stringByExpandingTildeInPath]
                                                      privateKey:[kPrivateKeyPath stringByExpandingTildeInPath]
                                                     andPassword:password];
             
@@ -470,7 +469,8 @@ static NSError *SCPFileError(NSString *description) {
 }
 
 - (BOOL)session:(NMSSHSession *)session shouldConnectToHostWithFingerprint:(NSString *)fingerprint {
-    __block BOOL result;
+    // It's not necessary to initialize result but it makes the analyzer shut up.
+    __block BOOL result = NO;
     dispatch_sync(dispatch_get_main_queue(), ^(void) {
         _okToAdd = NO;
         NSString *message;

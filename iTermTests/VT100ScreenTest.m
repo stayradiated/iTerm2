@@ -14,6 +14,10 @@
 #import "TmuxStateParser.h"
 #import "VT100ScreenTest.h"
 #import "VT100Screen.h"
+#import "iTermSelection.h"
+
+@interface VT100ScreenTest () <iTermSelectionDelegate>
+@end
 
 @interface VT100Screen (Testing)
 // It's only safe to use this on a newly created screen.
@@ -29,7 +33,7 @@
 
 @implementation VT100ScreenTest {
     VT100Terminal *terminal_;
-    int startX_, endX_, startY_, endY_;
+    iTermSelection *selection_;
     int needsRedraw_;
     int sizeDidChange_;
     BOOL cursorVisible_;
@@ -57,7 +61,8 @@
 
 - (void)setup {
     terminal_ = [[[VT100Terminal alloc] init] autorelease];
-    startX_ = endX_ = startY_ = endY_ = -1;
+    selection_ = [[[iTermSelection alloc] init] autorelease];
+    selection_.delegate = self;
     needsRedraw_ = 0;
     sizeDidChange_ = 0;
     cursorVisible_ = YES;
@@ -108,7 +113,7 @@
 
     // Append some stuff to it to make sure we can retreive it.
     for (int i = 0; i < [screen height] - 1; i++) {
-        [screen terminalAppendString:[NSString stringWithFormat:@"Line %d", i] isAscii:YES];
+        [screen terminalAppendString:[NSString stringWithFormat:@"Line %d", i]];
         [screen terminalLineFeed];
         [screen terminalCarriageReturn];
     }
@@ -178,7 +183,7 @@
     for (int i = 0; i < w; i++) {
         NSString *toAppend = [NSString stringWithFormat:@"%c", letters[i % n]];
         [expected appendString:toAppend];
-        [screen appendStringAtCursor:toAppend ascii:YES];
+        [screen appendStringAtCursor:toAppend];
     }
     NSString* s;
     s = ScreenCharArrayToStringDebug([screen getLineAtScreenIndex:0],
@@ -194,7 +199,7 @@
 
 - (void)appendLines:(NSArray *)lines toScreen:(VT100Screen *)screen {
     for (NSString *line in lines) {
-        [screen appendStringAtCursor:line ascii:YES];
+        [screen appendStringAtCursor:line];
         [screen terminalCarriageReturn];
         [screen terminalLineFeed];
     }
@@ -203,7 +208,7 @@
 - (void)appendLinesNoNewline:(NSArray *)lines toScreen:(VT100Screen *)screen {
   for (int i = 0; i < lines.count; i++) {
     NSString *line = lines[i];
-    [screen appendStringAtCursor:line ascii:YES];
+    [screen appendStringAtCursor:line];
     if (i + 1 != lines.count) {
       [screen terminalCarriageReturn];
       [screen terminalLineFeed];
@@ -274,34 +279,24 @@
     return YES;
 }
 
-- (int)screenSelectionStartX {
-    return startX_;
-}
-
-- (int)screenSelectionEndX {
-    return endX_;
-}
-
-- (int)screenSelectionStartY {
-    return startY_;
-}
-
-- (int)screenSelectionEndY {
-    return endY_;
+- (iTermSelection *)screenSelection {
+    return selection_;
 }
 
 - (void)screenSetSelectionFromX:(int)startX
                           fromY:(int)startY
                             toX:(int)endX
                             toY:(int)endY {
-    startX_ = startX;
-    startY_ = startY;
-    endX_ = endX;
-    endY_ = endY;
+    [selection_ clearSelection];
+    VT100GridWindowedRange theRange =
+        VT100GridWindowedRangeMake(VT100GridCoordRangeMake(startX, startY, endX, endY), 0, 0);
+    iTermSubSelection *theSub =
+        [iTermSubSelection subSelectionWithRange:theRange mode:kiTermSelectionModeCharacter];
+    [selection_ addSubSelection:theSub];
 }
 
 - (void)screenRemoveSelection {
-    startX_ = startY_ = endX_ = endY_ = -1;
+    [selection_ clearSelection];
 }
 
 - (void)screenNeedsRedraw {
@@ -362,33 +357,40 @@
 }
 
 - (NSString *)selectedStringInScreen:(VT100Screen *)screen {
-    if (startX_ < 0 ||
-        startY_ < 0 ||
-        endX_ < 0 ||
-        endY_ < 0) {
+    if (![selection_ hasSelection]) {
         return nil;
     }
     NSMutableString *s = [NSMutableString string];
-    int sx = startX_;
-    for (int y = startY_; y <= endY_; y++) {
-        screen_char_t *line = [screen getLineAtIndex:y];
-        int x;
-        int ex = y == endY_ ? endX_ : [screen width];
-        for (x = sx; x < ex; x++) {
-            if (line[x].code) {
-                [s appendString:ScreenCharArrayToStringDebug(line + x, 1)];
+    [selection_ enumerateSelectedRanges:^(VT100GridWindowedRange range, BOOL *stop, BOOL eol) {
+        int sx = range.coordRange.start.x;
+        for (int y = range.coordRange.start.y; y <= range.coordRange.end.y; y++) {
+            screen_char_t *line = [screen getLineAtIndex:y];
+            int x;
+            int ex = y == range.coordRange.end.y ? range.coordRange.end.x : [screen width];
+            BOOL newline = NO;
+            for (x = sx; x < ex; x++) {
+                if (line[x].code) {
+                    [s appendString:ScreenCharArrayToStringDebug(line + x, 1)];
+                } else {
+                    newline = YES;
+                    [s appendString:@"\n"];
+                    break;
+                }
             }
+            if (line[x].code == EOL_HARD && !newline && y != range.coordRange.end.y) {
+                [s appendString:@"\n"];
+            }
+            sx = 0;
         }
-        if ((y == endY_ &&
-             endX_ == [screen width] &&
-             line[x - 1].code == 0 &&
-             line[x].code == EOL_HARD) ||  // Last line of selection gets a newline iff there's a null char at the end
-            (y < endY_ && x == [screen width] && line[x].code == EOL_HARD)) {  // No null required for other lines
+        if (eol) {
             [s appendString:@"\n"];
         }
-        sx = 0;
-    }
+    }];
     return s;
+}
+
+- (BOOL)screenAllowTitleSetting {
+    return YES;
 }
 
 - (NSString *)screenCurrentWorkingDirectory {
@@ -419,6 +421,13 @@
     [triggerLine_ appendString:string];
 }
 
+- (void)screenDidAppendAsciiDataToCurrentLine:(AsciiData *)asciiData {
+    [self screenDidAppendStringToCurrentLine:[[[NSString alloc] initWithBytes:asciiData->buffer
+                                                                       length:asciiData->length
+                                                                     encoding:NSASCIIStringEncoding]
+                                              autorelease]];
+}
+
 - (void)screenDidReset {
 }
 
@@ -431,6 +440,16 @@
 
 - (void)screenPrintVisibleArea {
     [self screenPrintString:@"(screen dump)"];
+}
+
+- (void)setSelectionRange:(VT100GridCoordRange)range {
+    [selection_ clearSelection];
+    VT100GridWindowedRange theRange =
+        VT100GridWindowedRangeMake(range, 0, 0);
+    iTermSubSelection *theSub =
+        [iTermSubSelection subSelectionWithRange:theRange
+                                            mode:kiTermSelectionModeCharacter];
+    [selection_ addSubSelection:theSub];
 }
 
 - (void)testResizeWidthHeight {
@@ -646,10 +665,7 @@
     screen = [self fiveByFourScreenWithThreeLinesOneWrapped];
     screen.delegate = (id<VT100ScreenDelegate>)self;
     // select "jk"
-    startX_ = 1;
-    startY_ = 2;
-    endX_ = 3;
-    endY_ = 2;
+    [self setSelectionRange:VT100GridCoordRangeMake(1, 2, 3, 2)];
     [screen resizeWidth:3 height:3];
     assert([[screen compactLineDump] isEqualToString:
             @"ijk\n"
@@ -671,10 +687,7 @@
     screen = [self fiveByFourScreenWithThreeLinesOneWrapped];
     screen.delegate = (id<VT100ScreenDelegate>)self;
     // select "abcd"
-    startX_ = 0;
-    startY_ = 0;
-    endX_ = 4;
-    endY_ = 0;
+    [self setSelectionRange:VT100GridCoordRangeMake(0, 0, 4, 0)];
     [screen resizeWidth:3 height:3];
     assert([[screen compactLineDump] isEqualToString:
             @"ijk\n"
@@ -696,10 +709,7 @@
     screen = [self fiveByFourScreenWithThreeLinesOneWrapped];
     screen.delegate = (id<VT100ScreenDelegate>)self;
     // select "gh\ij"
-    startX_ = 1;
-    startY_ = 1;
-    endX_ = 2;
-    endY_ = 2;
+    [self setSelectionRange:VT100GridCoordRangeMake(1, 1, 2, 2)];
     [screen resizeWidth:3 height:3];
     assert([[screen compactLineDump] isEqualToString:
             @"ijk\n"
@@ -717,10 +727,7 @@
     screen = [self fiveByFourScreenWithThreeLinesOneWrapped];
     screen.delegate = (id<VT100ScreenDelegate>)self;
     // select "gh\ij"
-    startX_ = 1;
-    startY_ = 1;
-    endX_ = 2;
-    endY_ = 2;
+    [self setSelectionRange:VT100GridCoordRangeMake(1, 1, 2, 2)];
     [screen resizeWidth:9 height:4];
     assert([[screen compactLineDump] isEqualToString:
             @"abcdefgh.\n"
@@ -740,10 +747,7 @@
     screen.delegate = (id<VT100ScreenDelegate>)self;
     [self showAltAndUppercase:screen];
     // select "gh\ij"
-    startX_ = 1;
-    startY_ = 1;
-    endX_ = 2;
-    endY_ = 2;
+    [self setSelectionRange:VT100GridCoordRangeMake(1, 1, 2, 2)];
     [screen resizeWidth:4 height:4];
     assert([[screen compactLineDump] isEqualToString:
             @"ABCD\n"
@@ -761,10 +765,7 @@
     screen.delegate = (id<VT100ScreenDelegate>)self;
     [self showAltAndUppercase:screen];
     // select "gh\nij"
-    startX_ = 1;
-    startY_ = 1;
-    endX_ = 2;
-    endY_ = 2;
+    [self setSelectionRange:VT100GridCoordRangeMake(1, 1, 2, 2)];
     assert([[self selectedStringInScreen:screen] isEqualToString:@"GH\nIJ"]);
     [screen resizeWidth:3 height:3];
     assert([[screen compactLineDump] isEqualToString:
@@ -782,10 +783,7 @@
     screen.delegate = (id<VT100ScreenDelegate>)self;
     [self showAltAndUppercase:screen];
     // select "abc"
-    startX_ = 0;
-    startY_ = 0;
-    endX_ = 3;
-    endY_ = 0;
+    [self setSelectionRange:VT100GridCoordRangeMake(0, 0, 3, 0)];
     [screen resizeWidth:3 height:3];
     assert([[screen compactLineDump] isEqualToString:
             @"IJK\n"
@@ -802,10 +800,7 @@
     screen.delegate = (id<VT100ScreenDelegate>)self;
     [self showAltAndUppercase:screen];
     // select "gh\nij"
-    startX_ = 1;
-    startY_ = 1;
-    endX_ = 2;
-    endY_ = 2;
+    [self setSelectionRange:VT100GridCoordRangeMake(1, 1, 2, 2)];
     assert([[self selectedStringInScreen:screen] isEqualToString:@"GH\nIJ"]);
     [screen resizeWidth:6 height:5];
     assert([[screen compactLineDump] isEqualToString:
@@ -841,10 +836,7 @@
             @"....."]);
     // select everything
     // TODO There's a bug when the selection is at the very end (5,6). It is deselected.
-    startX_ = 0;
-    startY_ = 0;
-    endX_ = 1;
-    endY_ = 6;
+    [self setSelectionRange:VT100GridCoordRangeMake(0, 0, 1, 6)];
     assert([[self selectedStringInScreen:screen] isEqualToString:@"abcdefgh\nijkl\nMNOPQRST\nUVWXYZ"]);
     [screen resizeWidth:6 height:6];
     assert([[screen compactLineDump] isEqualToString:
@@ -881,10 +873,7 @@
     [self appendLines:@[@"abcdefgh", @"ijkl", @"mnopqrst", @"uvwxyz"] toScreen:screen];
     [self showAltAndUppercase:screen];
     // select everything
-    startX_ = 0;
-    startY_ = 0;
-    endX_ = 5;
-    endY_ = 6;
+    [self setSelectionRange:VT100GridCoordRangeMake(0, 0, 5, 6)];
     assert([[self selectedStringInScreen:screen] isEqualToString:@"abcdefgh\nijkl\nMNOPQRST\nUVWXYZ\n"]);
     [screen resizeWidth:6 height:6];
     ITERM_TEST_KNOWN_BUG([[self selectedStringInScreen:screen] isEqualToString:@"abcdefgh\nMNOPQRST\nUVWXYZ\n"],
@@ -928,10 +917,7 @@
     screen = [self fiveByFourScreenWithThreeLinesOneWrapped];
     screen.delegate = (id<VT100ScreenDelegate>)self;
     // select "efgh.."
-    startX_ = 4;
-    startY_ = 0;
-    endX_ = 5;
-    endY_ = 1;
+    [self setSelectionRange:VT100GridCoordRangeMake(4, 0, 5, 1)];
     [screen resizeWidth:3 height:3];
     assert([[self selectedStringInScreen:screen] isEqualToString:@"efgh\n"]);
     needsRedraw_ = 0;
@@ -946,10 +932,7 @@
     // abcde
     // fgh..
     // ijkl.
-    startX_ = 0;
-    startY_ = 0;
-    endX_ = 1;
-    endY_ = 2;
+    [self setSelectionRange:VT100GridCoordRangeMake(0, 0, 1, 2)];
     assert([[self selectedStringInScreen:screen] isEqualToString:@"\nabcdef"]);
     [screen resizeWidth:13 height:4];
     // TODO
@@ -975,10 +958,7 @@
             @"z....\n"
             @"....."]);
     [self showAltAndUppercase:screen];
-    startX_ = 0;
-    startY_ = 0;
-    endX_ = 2;
-    endY_ = 2;
+    [self setSelectionRange:VT100GridCoordRangeMake(0, 0, 2, 2)];
     assert([[self selectedStringInScreen:screen] isEqualToString:@"abcdefgh\nij"]);
     [screen resizeWidth:6 height:6];
     assert([[screen compactLineDumpWithHistory] isEqualToString:
@@ -1008,10 +988,7 @@
     screen.delegate = (id<VT100ScreenDelegate>)self;
     [self appendLines:@[@"abcdefgh", @"ijklmnopqrst", @"uvwxyz"] toScreen:screen];
     [self showAltAndUppercase:screen];
-    startX_ = 1;
-    startY_ = 2;
-    endX_ = 2;
-    endY_ = 3;
+    [self setSelectionRange:VT100GridCoordRangeMake(1, 2, 2, 3)];
     assert([[self selectedStringInScreen:screen] isEqualToString:@"jklmNO"]);
     [screen resizeWidth:6 height:6];
     assert([[self selectedStringInScreen:screen] isEqualToString:@"NO"]);
@@ -1022,10 +999,7 @@
     screen.delegate = (id<VT100ScreenDelegate>)self;
     [self appendLines:@[@"abcdefgh", @"ijklmnopqrst", @"uvwxyz"] toScreen:screen];
     [self showAltAndUppercase:screen];
-    startX_ = 0;
-    startY_ = 4;
-    endX_ = 2;
-    endY_ = 4;
+    [self setSelectionRange:VT100GridCoordRangeMake(0, 4, 2, 4)];
     assert([[self selectedStringInScreen:screen] isEqualToString:@"ST"]);
     [screen resizeWidth:6 height:6];
     assert([[self selectedStringInScreen:screen] isEqualToString:@"ST"]);
@@ -1037,10 +1011,7 @@
     screen.delegate = (id<VT100ScreenDelegate>)self;
     [self appendLines:@[@"abcdefgh", @"ijklmnopqrst", @"uvwxyz"] toScreen:screen];
     [self showAltAndUppercase:screen];
-    startX_ = 0;
-    startY_ = 2;
-    endX_ = 2;
-    endY_ = 2;
+    [self setSelectionRange:VT100GridCoordRangeMake(0, 2, 2, 2)];
     assert([[self selectedStringInScreen:screen] isEqualToString:@"ij"]);
     [screen resizeWidth:6 height:6];
     assert([self selectedStringInScreen:screen] == nil);
@@ -1052,10 +1023,7 @@
     screen.delegate = (id<VT100ScreenDelegate>)self;
     [self appendLines:@[@"abcdefgh", @"ijklmnopqrst", @"uvwxyz"] toScreen:screen];
     [self showAltAndUppercase:screen];
-    startX_ = 0;
-    startY_ = 0;
-    endX_ = 1;
-    endY_ = 1;
+    [self setSelectionRange:VT100GridCoordRangeMake(0, 0, 1, 1)];
     assert([[self selectedStringInScreen:screen] isEqualToString:@"abcdef"]);
     [screen resizeWidth:6 height:6];
     assert([[self selectedStringInScreen:screen] isEqualToString:@"abcdef"]);
@@ -1065,10 +1033,7 @@
     screen.delegate = (id<VT100ScreenDelegate>)self;
     [self appendLines:@[@"abcdefgh", @"ijklmnopqrst", @"uvwxyz"] toScreen:screen];
     [self showAltAndUppercase:screen];
-    startX_ = 0;
-    startY_ = 0;
-    endX_ = 5;
-    endY_ = 0;
+    [self setSelectionRange:VT100GridCoordRangeMake(0, 0, 5, 0)];
     assert([[self selectedStringInScreen:screen] isEqualToString:@"abcde"]);
     [screen resizeWidth:6 height:6];
     assert([[self selectedStringInScreen:screen] isEqualToString:@"abcde"]);
@@ -1078,10 +1043,7 @@
     screen.delegate = (id<VT100ScreenDelegate>)self;
     [self appendLines:@[@"abcdefgh", @"ijklmnopqrst", @"uvwxyz"] toScreen:screen];
     [self showAltAndUppercase:screen];
-    startX_ = 0;
-    startY_ = 0;
-    endX_ = 2;
-    endY_ = 1;
+    [self setSelectionRange:VT100GridCoordRangeMake(0, 0, 2, 1)];
     assert([[self selectedStringInScreen:screen] isEqualToString:@"abcdefg"]);
     [screen resizeWidth:6 height:6];
     assert([[self selectedStringInScreen:screen] isEqualToString:@"abcdef"]);
@@ -1286,6 +1248,14 @@
     assert([screen allCharacterSetPropertiesHaveDefaultValues]);
 }
 
+- (void)sendDataToTerminal:(NSData *)data {
+    [terminal_.parser putStreamData:data.bytes length:data.length];
+    NSMutableArray *tokens = [NSMutableArray array];
+    [terminal_.parser addParsedTokensToArray:tokens];
+    assert(tokens.count == 1);
+    [terminal_ executeToken:tokens[0]];
+}
+
 - (void)testAllCharacterSetPropertiesHaveDefaultValues {
     VT100Screen *screen = [self screenWithWidth:5 height:3];
     assert([screen allCharacterSetPropertiesHaveDefaultValues]);
@@ -1296,9 +1266,7 @@
     char shiftOut = 14;
     char shiftIn = 15;
     NSData *data = [NSData dataWithBytes:&shiftOut length:1];
-    [terminal_ putStreamData:data];
-    assert([terminal_ parseNextToken]);
-    [terminal_ executeToken];
+    [self sendDataToTerminal:data];
     assert(![screen allCharacterSetPropertiesHaveDefaultValues]);
     [screen terminalSetCharset:1 toLineDrawingMode:YES];
     assert(![screen allCharacterSetPropertiesHaveDefaultValues]);
@@ -1307,9 +1275,7 @@
     assert(![screen allCharacterSetPropertiesHaveDefaultValues]);
 
     data = [NSData dataWithBytes:&shiftIn length:1];
-    [terminal_ putStreamData:data];
-    assert([terminal_ parseNextToken]);
-    [terminal_ executeToken];
+    [self sendDataToTerminal:data];
     assert([screen allCharacterSetPropertiesHaveDefaultValues]);
 }
 
@@ -1369,8 +1335,7 @@
 - (void)testClearScrollbackBuffer {
     VT100Screen *screen = [self screenWithWidth:5 height:4];
     screen.delegate = (id<VT100ScreenDelegate>)self;
-    startX_ = startY_ = 1;
-    endX_ = endY_ = 1;
+    [self setSelectionRange:VT100GridCoordRangeMake(1, 1, 1, 1)];
     [self appendLines:@[@"abcdefgh", @"ijkl", @"mnopqrstuvwxyz"] toScreen:screen];
     assert([[screen compactLineDumpWithHistory] isEqualToString:
             @"abcde\n"
@@ -1387,10 +1352,7 @@
             @"wxyz.\n"
             @"....."]);
     assert(highlightsCleared_);
-    assert(startX_ == -1);
-    assert(startY_ == -1);
-    assert(endX_ == -1);
-    assert(endY_ == -1);
+    assert(![selection_ hasSelection]);
     assert([screen isAllDirty]);
 }
 
@@ -1400,9 +1362,11 @@
     codes = [codes stringByReplacingOccurrencesOfString:@"^[" withString:esc];
     codes = [codes stringByReplacingOccurrencesOfString:@"^G" withString:bel];
     NSData *data = [codes dataUsingEncoding:NSUTF8StringEncoding];
-    [terminal_ putStreamData:data];
-    while ([terminal_ parseNextToken]) {
-        [terminal_ executeToken];
+    [terminal_.parser putStreamData:data.bytes length:data.length];
+    NSMutableArray *tokens = [NSMutableArray array];
+    [terminal_.parser addParsedTokensToArray:tokens];
+    for (VT100Token *token in tokens) {
+        [terminal_ executeToken:token];
     }
 }
 
@@ -1415,7 +1379,7 @@
     [terminal_ setForegroundColor:5 alternateSemantics:NO];
     [terminal_ setBackgroundColor:6 alternateSemantics:NO];
     [self sendEscapeCodes:@"^[[1m^[[3m^[[4m^[[5m"];  // Bold, italic, blink, underline
-    [screen appendStringAtCursor:@"Hello world" ascii:YES];
+    [screen appendStringAtCursor:@"Hello world"];
 
     assert([[screen compactLineDump] isEqualToString:
             @"Hello\n"
@@ -1462,7 +1426,7 @@
 
     NSMutableString *s = [NSMutableString stringWithCharacters:chars
                                                         length:sizeof(chars) / sizeof(unichar)];
-    [screen appendStringAtCursor:s ascii:NO];
+    [screen appendStringAtCursor:s];
 
     screen_char_t *line = [screen getLineAtScreenIndex:0];
     assert(line[0].foregroundColor == 5);
@@ -1503,7 +1467,7 @@
     ambiguousIsDoubleWidth_ = YES;
     s = [NSMutableString stringWithCharacters:chars
                                        length:sizeof(chars) / sizeof(unichar)];
-    [screen appendStringAtCursor:s ascii:NO];
+    [screen appendStringAtCursor:s];
 
     line = [screen getLineAtScreenIndex:0];
 
@@ -1537,10 +1501,10 @@
     ambiguousIsDoubleWidth_ = NO;
     screen = [self screenWithWidth:20 height:2];
     screen.delegate = (id<VT100ScreenDelegate>)self;
-    [screen appendStringAtCursor:@"e" ascii:NO];
+    [screen appendStringAtCursor:@"e"];
     unichar combiningAcuteAccent = 0x301;
     s = [NSMutableString stringWithCharacters:&combiningAcuteAccent length:1];
-    [screen appendStringAtCursor:s ascii:NO];
+    [screen appendStringAtCursor:s];
     line = [screen getLineAtScreenIndex:0];
     a = [ScreenCharToStr(line + 0) decomposedStringWithCompatibilityMapping];
     e = [@"é" decomposedStringWithCompatibilityMapping];
@@ -1553,9 +1517,9 @@
     unichar highSurrogate = 0xD800;
     unichar lowSurrogate = 0xDD50;
     s = [NSMutableString stringWithCharacters:&highSurrogate length:1];
-    [screen appendStringAtCursor:s ascii:NO];
+    [screen appendStringAtCursor:s];
     s = [NSMutableString stringWithCharacters:&lowSurrogate length:1];
-    [screen appendStringAtCursor:s ascii:NO];
+    [screen appendStringAtCursor:s];
     line = [screen getLineAtScreenIndex:0];
     a = [ScreenCharToStr(line + 0) decomposedStringWithCompatibilityMapping];
     e = @"𐅐";
@@ -1565,9 +1529,9 @@
     ambiguousIsDoubleWidth_ = NO;
     screen = [self screenWithWidth:20 height:2];
     screen.delegate = (id<VT100ScreenDelegate>)self;
-    [screen appendStringAtCursor:@"g" ascii:NO];
+    [screen appendStringAtCursor:@"g"];
     s = [NSMutableString stringWithCharacters:&lowSurrogate length:1];
-    [screen appendStringAtCursor:s ascii:NO];
+    [screen appendStringAtCursor:s];
     line = [screen getLineAtScreenIndex:0];
 
     a = [ScreenCharToStr(line + 0) decomposedStringWithCompatibilityMapping];
@@ -2387,8 +2351,7 @@
     [self showAltAndUppercase:screen];
     screen.saveToScrollbackInAlternateScreen = YES;
     [screen resetDirty];
-    startX_ = startY_ = 1;
-    endX_ = endY_ = 2;
+    [self setSelectionRange:VT100GridCoordRangeMake(1, 1, 2, 2)];
     [screen terminalLineFeed];
     assert([screen scrollbackOverflow] == 1);
     assert([[screen compactLineDumpWithHistory] isEqualToString:
@@ -2403,13 +2366,11 @@
             @"dc\n"
             @"dd"]);
     [screen resetScrollbackOverflow];
-    assert(startX_ == 1);
+    assert([selection_ firstRange].coordRange.start.x == 1);
 
     screen.saveToScrollbackInAlternateScreen = NO;
     // scrollback overflow should be 0 and selection shoudn't be insane
-    startX_ = 1;
-    endX_ = 2;
-    startY_ = endY_ = 5;
+    [self setSelectionRange:VT100GridCoordRangeMake(1, 5, 2, 5)];
     [screen terminalLineFeed];
     assert([screen scrollbackOverflow] == 0);
     assert([[screen compactLineDumpWithHistory] isEqualToString:
@@ -2423,7 +2384,10 @@
             @"dd\n"
             @"dd\n"
             @"dd"]);
-    ITERM_TEST_KNOWN_BUG(startY_ == 4, startY_ == -1);  // See comment in -linefeed about why this happens
+    VT100GridWindowedRange selectionRange = [selection_ firstRange];
+    ITERM_TEST_KNOWN_BUG(selectionRange.coordRange.start.y == 4,
+                         selectionRange.coordRange.start.y == -1);
+    // See comment in -linefeed about why this happens
     // When this bug is fixed, also test truncation with and without scroll regions, as well
     // as deselection because the whole selection scrolled off the top of the scroll region.
 }
@@ -2474,7 +2438,7 @@
     screen.delegate = (id<VT100ScreenDelegate>)self;
     [screen resetDirty];
     assert(![screen isDirtyAtX:0 Y:0]);
-    [screen appendStringAtCursor:@"x" ascii:YES];
+    [screen appendStringAtCursor:@"x"];
     assert([screen isDirtyAtX:0 Y:0]);
     [screen clearBuffer];  // Marks everything dirty
     assert([screen isDirtyAtX:1 Y:1]);
@@ -2521,7 +2485,7 @@
     screen.delegate = (id<VT100ScreenDelegate>)self;
     printingAllowed_ = YES;
     [screen terminalBeginRedirectingToPrintBuffer];
-    [screen terminalAppendString:@"test" isAscii:YES];
+    [screen terminalAppendString:@"test"];
     [screen terminalLineFeed];
     [screen terminalPrintBuffer];
     assert([printed_ isEqualToString:@"test\n"]);
@@ -2529,7 +2493,7 @@
     
     printingAllowed_ = NO;
     [screen terminalBeginRedirectingToPrintBuffer];
-    [screen terminalAppendString:@"test" isAscii:YES];
+    [screen terminalAppendString:@"test"];
     assert([triggerLine_ isEqualToString:@"test"]);
     [screen terminalLineFeed];
     assert([triggerLine_ isEqualToString:@""]);
@@ -2548,7 +2512,7 @@
     // Normal case
     VT100Screen *screen = [self screenWithWidth:20 height:3];
     screen.delegate = (id<VT100ScreenDelegate>)self;
-    [screen appendStringAtCursor:@"Hello" ascii:YES];
+    [screen appendStringAtCursor:@"Hello"];
     [screen terminalMoveCursorToX:5 y:1];
     [screen terminalBackspace];
     assert(screen.cursorX == 4);
@@ -2557,7 +2521,7 @@
     // Wrap around soft eol
     screen = [self screenWithWidth:20 height:3];
     screen.delegate = (id<VT100ScreenDelegate>)self;
-    [screen appendStringAtCursor:@"12345678901234567890Hello" ascii:YES];
+    [screen appendStringAtCursor:@"12345678901234567890Hello"];
     [screen terminalMoveCursorToX:1 y:2];
     [screen terminalBackspace];
     assert(screen.cursorX == 20);
@@ -2584,7 +2548,7 @@
     // Over DWC_SKIP
     screen = [self screenWithWidth:20 height:3];
     screen.delegate = (id<VT100ScreenDelegate>)self;
-    [screen appendStringAtCursor:@"1234567890123456789Ｗ" ascii:NO];
+    [screen appendStringAtCursor:@"1234567890123456789Ｗ"];
     [screen terminalMoveCursorToX:1 y:2];
     [screen terminalBackspace];
     assert(screen.cursorX == 19);
@@ -2633,7 +2597,7 @@
     
     // Tabbing over text doesn't change it
     screen = [self screenWithWidth:20 height:3];
-    [screen appendStringAtCursor:@"0123456789" ascii:YES];
+    [screen appendStringAtCursor:@"0123456789"];
     [screen terminalMoveCursorToX:1 y:1];
     [screen terminalAppendTabAtCursor];
     assert([ScreenCharArrayToStringDebug([screen getLineAtScreenIndex:0],
@@ -2651,7 +2615,7 @@
     // If there is a single non-nil, then the cursor just moves.
     screen = [self screenWithWidth:20 height:3];
     [screen terminalMoveCursorToX:3 y:1];
-    [screen appendStringAtCursor:@"x" ascii:YES];
+    [screen appendStringAtCursor:@"x"];
     [screen terminalMoveCursorToX:1 y:1];
     [screen terminalAppendTabAtCursor];
     assert([ScreenCharArrayToStringDebug([screen getLineAtScreenIndex:0],
@@ -2761,7 +2725,7 @@
     assert(screen.cursorX == 1);
     assert(screen.cursorY == 1);
     [screen terminalMoveCursorToX:5 y:16];
-    [screen terminalAppendString:@"Hello" isAscii:YES];
+    [screen terminalAppendString:@"Hello"];
     assert([ScreenCharArrayToStringDebug([screen getLineAtScreenIndex:15],
                                          screen.width) isEqualToString:@"Hello"]);
     [screen terminalLineFeed];
@@ -3860,6 +3824,39 @@
   assert(range.start.y == 1);
   assert(range.end.x == 2);
   assert(range.end.y == 6);
+}
+
+#pragma mark - iTermSelectionDelegate
+
+- (void)selectionDidChange:(iTermSelection *)selection {
+}
+
+- (VT100GridWindowedRange)selectionRangeForParentheticalAt:(VT100GridCoord)coord {
+    return VT100GridWindowedRangeMake(VT100GridCoordRangeMake(0, 0, 0, 0), 0, 0);
+}
+
+- (VT100GridWindowedRange)selectionRangeForWordAt:(VT100GridCoord)coord {
+    return VT100GridWindowedRangeMake(VT100GridCoordRangeMake(0, 0, 0, 0), 0, 0);
+}
+
+- (VT100GridWindowedRange)selectionRangeForSmartSelectionAt:(VT100GridCoord)coord {
+    return VT100GridWindowedRangeMake(VT100GridCoordRangeMake(0, 0, 0, 0), 0, 0);
+}
+
+- (VT100GridCoordRange)selectionRangeForWrappedLineAt:(VT100GridCoord)coord {
+    return VT100GridCoordRangeMake(0, 0, 0, 0);
+}
+
+- (VT100GridCoordRange)selectionRangeForLineAt:(VT100GridCoord)coord {
+    return VT100GridCoordRangeMake(0, 0, 0, 0);
+}
+
+- (VT100GridRange)selectionRangeOfTerminalNullsOnLine:(int)lineNumber {
+    return VT100GridRangeMake(INT_MAX, 0);
+}
+
+- (VT100GridCoord)selectionPredecessorOfCoord:(VT100GridCoord)coord {
+    assert(false);
 }
 
 @end

@@ -7,6 +7,7 @@
 #import "ScreenChar.h"
 #import "Trouter.h"
 #import "iTerm.h"
+#import "iTermColorMap.h"
 #include <sys/time.h>
 
 @class CRunStorage;
@@ -63,13 +64,13 @@ typedef enum {
 - (void)paste:(id)sender;
 - (void)textViewFontDidChange;
 - (void)textViewSizeDidChange;
-- (PTYScrollView *)SCROLLVIEW;
+- (PTYScrollView *)scrollview;
 - (void)sendEscapeSequence:(NSString *)text;
 - (void)sendHexCode:(NSString *)codes;
 - (void)sendText:(NSString *)text;
 - (void)launchCoprocessWithCommand:(NSString *)command;
 - (void)insertText:(NSString *)string;
-- (PTYTask *)SHELL;
+- (PTYTask *)shell;
 - (BOOL)alertOnNextMark;
 - (void)startDownloadOverSCP:(SCPPath *)path;
 - (void)uploadFiles:(NSArray *)localFilenames toPath:(SCPPath *)destinationPath;
@@ -123,7 +124,8 @@ typedef enum {
   NSDraggingDestination,
   NSTextInput,
   PointerControllerDelegate,
-  TrouterDelegate>
+  TrouterDelegate,
+  iTermColorMapDelegate>
 
 // Current selection
 @property(nonatomic, readonly) iTermSelection *selection;
@@ -168,20 +170,58 @@ typedef enum {
 // When dimming inactive views, should only text be dimmed (not bg?)
 @property(nonatomic, assign) BOOL dimOnlyText;
 
-// Foreground color (the default color)
-@property(nonatomic, retain) NSColor *foregroundColor;
+// Should smart cursor color be used.
+@property(nonatomic, assign) BOOL useSmartCursorColor;
 
-// Background color (the default color)
-@property(nonatomic, retain) NSColor *backgroundColor;
+// Minimum contrast level. 0 to 1.
+@property(nonatomic, assign) double minimumContrast;
 
-// Color for bold text
-@property(nonatomic, retain) NSColor *boldColor;
+// Transparency level. 0 to 1.
+@property(nonatomic, assign) double transparency;
 
-// Color for selected background.
-@property(nonatomic, retain) NSColor *selectionColor;
+// Blending level for background color over background image
+@property(nonatomic, assign) double blend;
 
-// Color for cursor background.
-@property(nonatomic, retain) NSColor *cursorColor;
+// Should transparency be used?
+@property(nonatomic, readonly) BOOL useTransparency;
+
+// Indicates if the last key pressed was a repeat.
+@property(nonatomic, readonly) BOOL keyIsARepeat;
+
+// Returns the currently selected text.
+@property(nonatomic, readonly) NSString *selectedText;
+
+// Returns the entire content of the view as a string.
+@property(nonatomic, readonly) NSString *content;
+
+// Returns the time (since 1970) when the selection was last modified, or 0 if there is no selection
+@property(nonatomic, readonly) NSTimeInterval selectionTime;
+
+// Regular and non-ascii fonts.
+@property(nonatomic, readonly) NSFont *font;
+@property(nonatomic, readonly) NSFont *nonAsciiFont;
+
+// Size of a character.
+@property(nonatomic, readonly) double lineHeight;
+@property(nonatomic, readonly) double charWidth;
+
+// Is the cursor visible? Defaults to YES.
+@property(nonatomic, assign) BOOL cursorVisible;
+
+// Indicates if a find is in progress.
+@property(nonatomic, readonly) BOOL findInProgress;
+
+// An absolute scroll position which won't change as lines in history are dropped.
+@property(nonatomic, readonly) long long absoluteScrollPosition;
+
+// Returns the current find context, or one initialized to empty.
+@property(nonatomic, readonly) FindContext *findContext;
+
+// Indicates if the "find cursor" mode is active.
+@property(nonatomic, readonly) BOOL isFindingCursor;
+
+// Stores colors. This object is its delegate.
+@property(nonatomic, readonly) iTermColorMap *colorMap;
 
 // Returns the mouse cursor to use when the mouse is in this view.
 + (NSCursor *)textViewCursor;
@@ -192,15 +232,17 @@ typedef enum {
         horizontalSpacing:(double)hspace
           verticalSpacing:(double)vspace;
 
+// This is the designated initializer. The color map should have the
+// basic colors plus the 8-bit ansi colors set shortly after this is
+// called.
+- (id)initWithFrame:(NSRect)frame colorMap:(iTermColorMap *)colorMap;
+
 // Sets the "changed since last Exposé" flag to NO and returns its original value.
 - (BOOL)getAndResetChangedSinceLastExpose;
 
 // Draw the given rect. If toOrigin is not NULL, then the NSPoint it points at is used as an origin
 // for all drawing.
 - (void)drawRect:(NSRect)rect to:(NSPoint*)toOrigin;
-
-// Indicates if the last key pressed was a repeat.
-- (BOOL)keyIsARepeat;
 
 // Changes the document cursor, if needed. The event is used to get modifier flags.
 - (void)updateCursor:(NSEvent *)event;
@@ -222,15 +264,9 @@ typedef enum {
 - (VT100GridCoordRange)rangeByTrimmingNullsFromRange:(VT100GridCoordRange)range
                                           trimSpaces:(BOOL)trimSpaces;
 
-// Returns the currently selected text.
-- (NSString *)selectedText;
-
 // Returns the currently selected text. If pad is set, then the last line will be padded out to the
 // full width of the view with spaces.
 - (NSString *)selectedTextWithPad:(BOOL)pad;
-
-// Returns the entire content of the view as a string.
-- (NSString *)content;
 
 // Copy with or without styles, as set by user defaults. Not for use when a copy item in the menu is invoked.
 - (void)copySelectionAccordingToUserPreferences;
@@ -246,9 +282,6 @@ typedef enum {
 // Paste from the pasteboard.
 - (void)paste:(id)sender;
 
-// Returns the time (since 1970) when the selection was last modified.
-- (NSTimeInterval)selectionTime;
-
 // Cause the next find to start at the top/bottom of the buffer
 - (void)resetFindCursor;
 
@@ -260,46 +293,18 @@ typedef enum {
 - (void)setTrouterPrefs:(NSDictionary *)prefs;
 
 // Various accessors (TODO: convert as many as possible into properties)
-- (NSFont *)font;
-- (NSFont *)nafont;
 - (void)setFont:(NSFont*)aFont
-         nafont:(NSFont *)naFont
+    nonAsciiFont:(NSFont *)nonAsciiFont
     horizontalSpacing:(double)horizontalSpacing
     verticalSpacing:(double)verticalSpacing;
 - (NSRect)scrollViewContentSize;
 - (void)setAntiAlias:(BOOL)asciiAA nonAscii:(BOOL)nonAsciiAA;
-
-// Color stuff
-- (NSColor*)colorForCode:(int)theIndex
-                   green:(int)green
-                    blue:(int)blue
-               colorMode:(ColorMode)theMode
-                    bold:(BOOL)isBold
-            isBackground:(BOOL)isBackground;
-- (NSColor*)colorFromRed:(int)red green:(int)green blue:(int)blue;
-- (void)setColorTable:(int) theIndex color:(NSColor *) c;
-
-- (NSColor*)selectedTextColor;
-- (void)setSelectedTextColor:(NSColor *)aColor;
-
-- (NSColor*)cursorTextColor;
-- (void)setCursorTextColor:(NSColor*)color;
-
-- (void)setSmartCursorColor:(BOOL)value;
-- (void)setMinimumContrast:(double)value;
 
 // Update the scroller color for light or dark backgrounds.
 - (void)updateScrollerForBackgroundColor;
 
 // Remove underline indicating clickable URL.
 - (void)removeUnderline;
-
-// Number of extra lines below the last line of text that are always the background color.
-- (double)excess;
-
-// Size of a character.
-- (double)lineHeight;
-- (double)charWidth;
 
 // Toggles whether line timestamps are displayed.
 - (void)toggleShowTimestamps;
@@ -309,24 +314,9 @@ typedef enum {
 - (BOOL)refresh;
 - (void)setNeedsDisplayOnLine:(int)line;
 
-// Change visibility of cursor
-- (void)showCursor;
-- (void)hideCursor;
-- (BOOL)cursorIsVisible;
-
 // selection
 - (IBAction)selectAll:(id)sender;
 - (void)deselect;
-
-// transparency
-- (double)transparency;
-- (double)blend;
-- (void)setTransparency:(double)fVal;
-- (void)setBlend:(double)blend;
-- (BOOL)useTransparency;
-
-// Dim all colors towards gray
-- (void)setDimmingAmount:(double)value;
 
 // Scrolling control
 - (void)scrollLineNumberRangeIntoView:(VT100GridRange)range;
@@ -355,9 +345,6 @@ typedef enum {
 // Remove highlighted terms from previous search.
 - (void)clearHighlights;
 
-// Indicates if a find is in progress.
-- (BOOL)findInProgress;
-
 // Performs a find on the next chunk of text.
 - (BOOL)continueFind;
 
@@ -377,27 +364,17 @@ typedef enum {
 // Draws a portion of this view's background to a different location whose origin is dest.
 - (void)drawBackground:(NSRect)bgRect toPoint:(NSPoint)dest;
 
-// Returns an absolute scroll position which won't change as lines in history are dropped.
-- (long long)absoluteScrollPosition;
-
 // Returns true if any character in the buffer is selected.
 - (BOOL)isAnyCharSelected;
 
 // The "find cursor" mode will show for a bit and then hide itself.
 - (void)placeFindCursorOnAutoHide;
 
-// Indicates if the "find cursor" mode is active.
-- (BOOL)isFindingCursor;
-
 // Begins the "find cursor" mode.
 - (void)beginFindCursor:(BOOL)hold;
 
 // Stops the "find cursor" mode.
 - (void)endFindCursor;
-
-// Returns the current find context, or one initialized to empty. (TODO: I don't remember why it has
-// this dumb name)
-- (FindContext *)initialFindContext;
 
 // Begin click-to-move mode.
 - (void)movePane:(id)sender;
@@ -422,9 +399,6 @@ typedef enum {
 
 // Show a visual highlight of a mark on the given line number.
 - (void)highlightMarkOnLine:(int)line;
-
-// Characters that divide words.
-- (NSCharacterSet *)wordSeparatorCharacterSet;
 
 @end
 

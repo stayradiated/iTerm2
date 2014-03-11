@@ -27,6 +27,21 @@ static const int kNumCharsToSearchForDivider = 8;
     return [[[self alloc] initWithDataSource:dataSource] autorelease];
 }
 
++ (NSCharacterSet *)wordSeparatorCharacterSet
+{
+    NSMutableCharacterSet *charset = [[[NSMutableCharacterSet alloc] init] autorelease];
+    [charset formUnionWithCharacterSet:[NSCharacterSet whitespaceCharacterSet]];
+    
+    NSMutableCharacterSet *complement = [[[NSMutableCharacterSet alloc] init] autorelease];
+    [complement formUnionWithCharacterSet:[NSCharacterSet alphanumericCharacterSet]];
+    [complement addCharactersInString:[[PreferencePanel sharedInstance] wordChars]];
+    [complement addCharactersInRange:NSMakeRange(DWC_RIGHT, 1)];
+    [complement addCharactersInRange:NSMakeRange(DWC_SKIP, 1)];
+    [charset formUnionWithCharacterSet:[complement invertedSet]];
+    
+    return charset;
+}
+
 - (id)initWithDataSource:(id<PTYTextViewDataSource>)dataSource {
     self = [super init];
     if (self) {
@@ -379,7 +394,8 @@ static const int kNumCharsToSearchForDivider = 8;
   forCharacterMatchingFilter:(BOOL (^)(screen_char_t, VT100GridCoord))block {
     VT100GridCoord coord = start;
     screen_char_t *theLine;
-    int y = -1;
+    int y = coord.y;
+    theLine = [_dataSource getLineAtIndex:coord.y];
     while (1) {
         if (y != coord.y) {
             theLine = [_dataSource getLineAtIndex:coord.y];
@@ -525,7 +541,7 @@ static const int kNumCharsToSearchForDivider = 8;
                               // Normal character
                               [result appendString:ScreenCharToStr(&theChar)];
                           }
-                          return NO;
+                          return [result length] >= maxBytes;
                       }
                        eolBlock:^BOOL(unichar code, int numPreceedingNulls, int line) {
                                // If there is no text after this, insert a hard line break.
@@ -541,7 +557,7 @@ static const int kNumCharsToSearchForDivider = 8;
                                    }
                                    [result appendString:@"\n"];
                                }
-                               return NO;
+                               return [result length] >= maxBytes;
                            }];
     
     if (trimSelectionTrailingSpaces) {
@@ -555,7 +571,6 @@ static const int kNumCharsToSearchForDivider = 8;
                                              pad:(BOOL)pad
                                attributeProvider:(NSDictionary *(^)(screen_char_t))attributeProvider
 {
-    int width = [_dataSource width];
     NSMutableAttributedString* result = [[[NSMutableAttributedString alloc] init] autorelease];
     [self enumerateCharsInRange:range
                       charBlock:^BOOL(screen_char_t theChar, VT100GridCoord coord) {
@@ -861,9 +876,9 @@ static const int kNumCharsToSearchForDivider = 8;
 - (screen_char_t)defaultChar {
     screen_char_t defaultChar = { 0 };
     defaultChar.foregroundColorMode = ColorModeAlternate;
-    defaultChar.foregroundColor = ALTSEM_FG_DEFAULT;
+    defaultChar.foregroundColor = ALTSEM_DEFAULT;
     defaultChar.backgroundColorMode = ColorModeAlternate;
-    defaultChar.backgroundColor = ALTSEM_BG_DEFAULT;
+    defaultChar.backgroundColor = ALTSEM_DEFAULT;
     return defaultChar;
 }
 

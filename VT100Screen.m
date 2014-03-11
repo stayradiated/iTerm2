@@ -4,6 +4,7 @@
 #import "DVR.h"
 #import "IntervalTree.h"
 #import "NSArray+iTerm.h"
+#import "NSColor+iTerm.h"
 #import "PTYNoteViewController.h"
 #import "PTYTextView.h"
 #import "RegexKitLite.h"
@@ -12,9 +13,11 @@
 #import "VT100RemoteHost.h"
 #import "VT100ScreenMark.h"
 #import "VT100WorkingDirectory.h"
+#import "iTermColorMap.h"
 #import "iTermExpose.h"
 #import "iTermGrowlDelegate.h"
 #import "iTermSelection.h"
+#import "VT100Token.h"
 
 #import <apr-1/apr_base64.h>
 #include <string.h>
@@ -107,6 +110,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     [dvr_ release];
     [terminal_ release];
     [findContext_ release];
+    [savedIntervalTree_ release];
     [intervalTree_ release];
     [markCache_ release];
     [inlineFileInfo_ release];
@@ -338,7 +342,6 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
         // selection. Later this will be used to set the selection positions
         // relative to the end of the udpated linebuffer (which could change as
         // lines from the base screen are pushed onto it).
-        BOOL ok1, ok2;
         LineBuffer *lineBufferWithAltScreen = [[linebuffer_ newAppendOnlyCopy] autorelease];
         [self appendScreen:currentGrid_
               toScrollback:lineBufferWithAltScreen
@@ -673,7 +676,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     int lines = [linebuffer_ numLinesWithWidth:currentGrid_.size.width];
     NSAssert(lines >= 0, @"Negative lines");
 
-    // An immediate refresh is needed so that the size of TEXTVIEW can be
+    // An immediate refresh is needed so that the size of textview can be
     // adjusted to fit the new size
     DebugLog(@"resizeWidth setDirty");
     [delegate_ screenNeedsRedraw];
@@ -760,131 +763,140 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     [self reloadMarkCache];
 }
 
-- (void)appendStringAtCursor:(NSString *)string ascii:(BOOL)ascii
+- (void)appendAsciiDataAtCursor:(AsciiData *)asciiData
 {
-    DLog(@"setString: %ld chars starting with %c at x=%d, y=%d, line=%d",
-         (unsigned long)[string length],
-         [string characterAtIndex:0],
+    int len = asciiData->length;
+    if (len < 1 || !asciiData) {
+        return;
+    }
+    STOPWATCH_START(appendAsciiDataAtCursor);
+    char firstChar = asciiData->buffer[0];
+    
+    DLog(@"appendAsciiDataAtCursor: %ld chars starting with %c at x=%d, y=%d, line=%d",
+         (unsigned long)len,
+         firstChar,
          currentGrid_.cursorX,
          currentGrid_.cursorY,
          currentGrid_.cursorY + [linebuffer_ numLinesWithWidth:currentGrid_.size.width]);
 
+    screen_char_t *buffer;
+    buffer = asciiData->screenChars->buffer;
+    
+    screen_char_t fg = [terminal_ foregroundColorCode];
+    screen_char_t bg = [terminal_ backgroundColorCode];
+    screen_char_t zero = { 0 };
+    if (memcmp(&fg, &zero, sizeof(fg)) || memcmp(&bg, &zero, sizeof(bg))) {
+        STOPWATCH_START(setUpScreenCharArray);
+        for (int i = 0; i < len; i++) {
+            CopyForegroundColor(&buffer[i], fg);
+            CopyBackgroundColor(&buffer[i], bg);
+        }
+        STOPWATCH_LAP(setUpScreenCharArray);
+    }
+
+    // If a graphics character set was selected then translate buffer
+    // characters into graphics charaters.
+    if (charsetUsesLineDrawingMode_[[terminal_ charset]]) {
+        ConvertCharsToGraphicsCharset(buffer, len);
+    }
+
+    [self appendScreenCharArrayAtCursor:buffer
+                                 length:len
+                             shouldFree:NO];
+    STOPWATCH_LAP(appendAsciiDataAtCursor);
+}
+
+- (void)appendStringAtCursor:(NSString *)string
+{
     int len = [string length];
     if (len < 1 || !string) {
         return;
     }
+    
+    unichar firstChar =  [string characterAtIndex:0];
+    
+    DLog(@"appendStringAtCursor: %ld chars starting with %c at x=%d, y=%d, line=%d",
+         (unsigned long)len,
+         firstChar,
+         currentGrid_.cursorX,
+         currentGrid_.cursorY,
+         currentGrid_.cursorY + [linebuffer_ numLinesWithWidth:currentGrid_.size.width]);
 
     // Allocate a buffer of screen_char_t and place the new string in it.
     const int kStaticBufferElements = 1024;
     screen_char_t staticBuffer[kStaticBufferElements];
     screen_char_t *dynamicBuffer = 0;
     screen_char_t *buffer;
-    if (ascii) {
-        // Only Unicode code points 0 through 127 occur in the string.
-        const int kStaticTempElements = kStaticBufferElements;
-        unichar staticTemp[kStaticTempElements];
-        unichar* dynamicTemp = 0;
-        unichar *sc;
-        if ([string length] > kStaticTempElements) {
-            dynamicTemp = sc = (unichar *) calloc(len, sizeof(unichar));
-            assert(dynamicTemp);
-        } else {
-            sc = staticTemp;
-        }
-        assert(terminal_);
-        screen_char_t fg = [terminal_ foregroundColorCode];
-        screen_char_t bg = [terminal_ backgroundColorCode];
-
-        if ([string length] > kStaticBufferElements) {
-            buffer = dynamicBuffer = (screen_char_t *) calloc([string length],
-                                                              sizeof(screen_char_t));
-            assert(dynamicBuffer);
-            if (!buffer) {
-                NSLog(@"%s: Out of memory", __PRETTY_FUNCTION__);
-                return;
-            }
-        } else {
-            buffer = staticBuffer;
-        }
-
-        [string getCharacters:sc];
-        for (int i = 0; i < len; i++) {
-            buffer[i].code = sc[i];
-            buffer[i].complexChar = NO;
-            CopyForegroundColor(&buffer[i], fg);
-            CopyBackgroundColor(&buffer[i], bg);
-            buffer[i].unused = 0;
-        }
-
-        // If a graphics character set was selected then translate buffer
-        // characters into graphics charaters.
-        if (charsetUsesLineDrawingMode_[[terminal_ charset]]) {
-            ConvertCharsToGraphicsCharset(buffer, len);
-        }
-        if (dynamicTemp) {
-            free(dynamicTemp);
+    string = [string precomposedStringWithCanonicalMapping];
+    len = [string length];
+    if (2 * len > kStaticBufferElements) {
+        buffer = dynamicBuffer = (screen_char_t *) calloc(2 * len,
+                                                          sizeof(screen_char_t));
+        assert(buffer);
+        if (!buffer) {
+            NSLog(@"%s: Out of memory", __PRETTY_FUNCTION__);
+            return;
         }
     } else {
-        string = [string precomposedStringWithCanonicalMapping];
-        len = [string length];
-        if (2 * len > kStaticBufferElements) {
-            buffer = dynamicBuffer = (screen_char_t *) calloc(2 * len,
-                                                              sizeof(screen_char_t));
-            assert(buffer);
-            if (!buffer) {
-                NSLog(@"%s: Out of memory", __PRETTY_FUNCTION__);
-                return;
-            }
-        } else {
-            buffer = staticBuffer;
-        }
-
-        // Pick off leading combining marks and low surrogates and modify the
-        // character at the cursor position with them.
-        unichar firstChar = [string characterAtIndex:0];
-        while ([string length] > 0 &&
-               (IsCombiningMark(firstChar) || IsLowSurrogate(firstChar))) {
-            VT100GridCoord pred = [currentGrid_ coordinateBefore:currentGrid_.cursor];
-            if (pred.x < 0 ||
-                ![currentGrid_ addCombiningChar:firstChar toCoord:pred]) {
-                // Combining mark will need to stand alone rather than combine
-                // because nothing precedes it.
-                if (IsCombiningMark(firstChar)) {
-                    // Prepend a space to it so the combining mark has something
-                    // to combine with.
-                    string = [NSString stringWithFormat:@" %@", string];
-                } else {
-                    // Got a low surrogate but can't find the matching high
-                    // surrogate. Turn the low surrogate into a replacement
-                    // char. This should never happen because decode_string
-                    // ought to detect the broken unicode and substitute a
-                    // replacement char.
-                    string = [NSString stringWithFormat:@"%@%@",
-                              ReplacementString(),
-                              [string substringFromIndex:1]];
-                }
-                len = [string length];
-                break;
-            }
-            string = [string substringFromIndex:1];
-            if ([string length] > 0) {
-                firstChar = [string characterAtIndex:0];
-            }
-        }
-
-        assert(terminal_);
-        // Add DWC_RIGHT after each double-byte character, build complex characters out of surrogates
-        // and combining marks, replace private codes with replacement characters, swallow zero-
-        // width spaces, and set fg/bg colors and attributes.
-        StringToScreenChars(string,
-                            buffer,
-                            [terminal_ foregroundColorCode],
-                            [terminal_ backgroundColorCode],
-                            &len,
-                            [delegate_ screenShouldTreatAmbiguousCharsAsDoubleWidth],
-                            NULL);
+        buffer = staticBuffer;
     }
 
+    // Pick off leading combining marks and low surrogates and modify the
+    // character at the cursor position with them.
+    while ([string length] > 0 &&
+           (IsCombiningMark(firstChar) || IsLowSurrogate(firstChar))) {
+        VT100GridCoord pred = [currentGrid_ coordinateBefore:currentGrid_.cursor];
+        if (pred.x < 0 ||
+            ![currentGrid_ addCombiningChar:firstChar toCoord:pred]) {
+            // Combining mark will need to stand alone rather than combine
+            // because nothing precedes it.
+            if (IsCombiningMark(firstChar)) {
+                // Prepend a space to it so the combining mark has something
+                // to combine with.
+                string = [NSString stringWithFormat:@" %@", string];
+            } else {
+                // Got a low surrogate but can't find the matching high
+                // surrogate. Turn the low surrogate into a replacement
+                // char. This should never happen because decode_string
+                // ought to detect the broken unicode and substitute a
+                // replacement char.
+                string = [NSString stringWithFormat:@"%@%@",
+                          ReplacementString(),
+                          [string substringFromIndex:1]];
+            }
+            len = [string length];
+            break;
+        }
+        string = [string substringFromIndex:1];
+        if ([string length] > 0) {
+            firstChar = [string characterAtIndex:0];
+        }
+    }
+
+    assert(terminal_);
+    // Add DWC_RIGHT after each double-byte character, build complex characters out of surrogates
+    // and combining marks, replace private codes with replacement characters, swallow zero-
+    // width spaces, and set fg/bg colors and attributes.
+    BOOL dwc = NO;
+    StringToScreenChars(string,
+                        buffer,
+                        [terminal_ foregroundColorCode],
+                        [terminal_ backgroundColorCode],
+                        &len,
+                        [delegate_ screenShouldTreatAmbiguousCharsAsDoubleWidth],
+                        NULL,
+                        &dwc);
+    if (dwc) {
+        linebuffer_.mayHaveDoubleWidthCharacter = dwc;
+    }
+    [self appendScreenCharArrayAtCursor:buffer
+                                 length:len
+                             shouldFree:(buffer == dynamicBuffer)];
+}
+
+- (void)appendScreenCharArrayAtCursor:(screen_char_t *)buffer
+                               length:(int)len
+                           shouldFree:(BOOL)shouldFree {
     if (len >= 1) {
         [self incrementOverflowBy:[currentGrid_ appendCharsAtCursor:buffer
                                                              length:len
@@ -896,8 +908,8 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
                                                              insert:_insert]];
     }
 
-    if (dynamicBuffer) {
-        free(dynamicBuffer);
+    if (shouldFree) {
+        free(buffer);
     }
     
     if (commandStartX_ != -1) {
@@ -985,6 +997,8 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     // line (excluding empty ones at the end) to the real line buffer.
     [self clearBuffer];
     LineBuffer *temp = [[[LineBuffer alloc] init] autorelease];
+    temp.mayHaveDoubleWidthCharacter = YES;
+    linebuffer_.mayHaveDoubleWidthCharacter = YES;
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     for (NSData *chars in history) {
         screen_char_t *line = (screen_char_t *) [chars bytes];
@@ -1035,6 +1049,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
 
 - (void)setAltScreen:(NSArray *)lines
 {
+    linebuffer_.mayHaveDoubleWidthCharacter = YES;
     if (!altGrid_) {
         altGrid_ = [primaryGrid_ copy];
     }
@@ -1849,15 +1864,28 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
 
 #pragma mark - VT100TerminalDelegate
 
-- (void)terminalAppendString:(NSString *)string isAscii:(BOOL)isAscii
-{
+- (void)terminalAppendString:(NSString *)string {
     if (collectInputForPrinting_) {
         [printBuffer_ appendString:string];
     } else {
         // else display string on screen
-        [self appendStringAtCursor:string ascii:isAscii];
+        [self appendStringAtCursor:string];
     }
     [delegate_ screenDidAppendStringToCurrentLine:string];
+}
+
+- (void)terminalAppendAsciiData:(AsciiData *)asciiData {
+    if (collectInputForPrinting_) {
+        NSString *string = [[[NSString alloc] initWithBytes:asciiData->buffer
+                                                     length:asciiData->length
+                                                   encoding:NSASCIIStringEncoding] autorelease];
+        [self terminalAppendString:string];
+        return;
+    } else {
+        // else display string on screen
+        [self appendAsciiDataAtCursor:asciiData];
+    }
+    [delegate_ screenDidAppendAsciiDataToCurrentLine:asciiData];
 }
 
 - (void)terminalRingBell {
@@ -2591,6 +2619,10 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     [delegate_ screenStartTmuxMode];
 }
 
+- (void)terminalHandleTmuxInput:(VT100Token *)token {
+    [delegate_ screenHandleTmuxInput:token];
+}
+
 - (int)terminalWidth {
     return [self width];
 }
@@ -2769,10 +2801,6 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
         [array addObject:[NSNumber numberWithInt:modifiers[i]]];
     }
     [delegate_ screenModifiersDidChangeTo:array];
-}
-
-- (void)terminalColorTableEntryAtIndex:(int)theIndex didChangeToColor:(NSColor *)theColor {
-    [delegate_ screenSetColorTableEntryAtIndex:theIndex color:theColor];
 }
 
 - (void)terminalSaveScrollPositionWithArgument:(NSString *)argument {
@@ -3022,35 +3050,35 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
 }
 
 - (void)terminalSetForegroundColor:(NSColor *)color {
-    [delegate_ screenSetForegroundColor:color];
+    [[delegate_ screenColorMap] setColor:color forKey:kColorMapForeground];
 }
 
-- (void)terminalSetBackgroundGColor:(NSColor *)color {
-    [delegate_ screenSetBackgroundColor:color];
+- (void)terminalSetBackgroundColor:(NSColor *)color {
+    [[delegate_ screenColorMap] setColor:color forKey:kColorMapBackground];
 }
 
 - (void)terminalSetBoldColor:(NSColor *)color {
-    [delegate_ screenSetBoldColor:color];
+    [[delegate_ screenColorMap] setColor:color forKey:kColorMapBold];
 }
 
 - (void)terminalSetSelectionColor:(NSColor *)color {
-    [delegate_ screenSetSelectionColor:color];
+    [[delegate_ screenColorMap] setColor:color forKey:kColorMapSelection];
 }
 
 - (void)terminalSetSelectedTextColor:(NSColor *)color {
-    [delegate_ screenSetSelectedTextColor:color];
+    [[delegate_ screenColorMap] setColor:color forKey:kColorMapSelectedText];
 }
 
 - (void)terminalSetCursorColor:(NSColor *)color {
-    [delegate_ screenSetCursorColor:color];
+    [[delegate_ screenColorMap] setColor:color forKey:kColorMapCursor];
 }
 
 - (void)terminalSetCursorTextColor:(NSColor *)color {
-    [delegate_ screenSetCursorTextColor:color];
+    [[delegate_ screenColorMap] setColor:color forKey:kColorMapCursorText];
 }
 
 - (void)terminalSetColorTableEntryAtIndex:(int)n color:(NSColor *)color {
-    [delegate_ screenSetColorTableEntryAtIndex:n color:color];
+    [[delegate_ screenColorMap] setColor:color forKey:kColorMap8bitBase + n];
 }
 
 - (void)terminalSetCurrentTabColor:(NSColor *)color {
@@ -3223,26 +3251,13 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     NSLog(@"%@", [self debugString]);
 }
 
-- (int)colorCodeForColor:(NSColor *)theColor
-{
-    if (theColor) {
-        theColor = [theColor colorUsingColorSpaceName:NSCalibratedRGBColorSpace];
-        int r = 5 * [theColor redComponent];
-        int g = 5 * [theColor greenComponent];
-        int b = 5 * [theColor blueComponent];
-        return 16 + b + g*6 + r*36;
-    } else {
-        return 0;
-    }
-}
-
 // Set the color of prototypechar to all chars between startPoint and endPoint on the screen.
 - (void)highlightRun:(VT100GridRun)run
     withForegroundColor:(NSColor *)fgColor
         backgroundColor:(NSColor *)bgColor
 {
-    int fgColorCode = [self colorCodeForColor:fgColor];
-    int bgColorCode = [self colorCodeForColor:bgColor];
+    int fgColorCode = [fgColor nearestIndexIntoAnsi256ColorTable];
+    int bgColorCode = [bgColor nearestIndexIntoAnsi256ColorTable];
 
     screen_char_t fg = { 0 };
     screen_char_t bg = { 0 };
@@ -3475,7 +3490,9 @@ static void SwapInt(int *a, int *b) {
         return NO;
     }
     if (selectionStartPositionIsValid) {
-        resultPtr->start = [lineBuffer coordinateForPosition:selectionStartPosition width:newWidth ok:NULL];
+        resultPtr->start = [lineBuffer coordinateForPosition:selectionStartPosition
+                                                       width:newWidth
+                                                          ok:NULL];
         if (selectionEndPostionIsValid) {
             VT100GridCoord newEnd = [lineBuffer coordinateForPosition:selectionEndPosition width:newWidth ok:NULL];
             newEnd.x++;
@@ -3488,11 +3505,13 @@ static void SwapInt(int *a, int *b) {
             resultPtr->end.x = currentGrid_.size.width;
             resultPtr->end.y = [lineBuffer numLinesWithWidth:newWidth] + currentGrid_.size.height - 1;
         }
+        if (selectionEndPosition.extendsToEndOfLine) {
+            resultPtr->end.x = newWidth;
+        }
+        return YES;
+    } else {
+        return NO;
     }
-    if (selectionEndPostionIsValid && selectionEndPosition.extendsToEndOfLine) {
-        resultPtr->end.x = newWidth;
-    }
-    return YES;
 }
 
 - (void)incrementOverflowBy:(int)overflowCount {

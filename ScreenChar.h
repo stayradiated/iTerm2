@@ -93,21 +93,22 @@
 #define ONECHAR_UNKNOWN ('?')   // Relacement character for encodings other than utf-8.
 
 // Alternate semantics definitions
-// Default background color
-#define ALTSEM_BG_DEFAULT 0
-// Default foreground color
-#define ALTSEM_FG_DEFAULT 1
+// Default foreground/background color
+#define ALTSEM_DEFAULT 0
 // Selected color
-#define ALTSEM_SELECTED 2
+#define ALTSEM_SELECTED 1
 // Cursor color
-#define ALTSEM_CURSOR 3
+#define ALTSEM_CURSOR 2
+// Use default foreground/background, but use default background for foreground and default
+// foreground for background (reverse video).
+#define ALTSEM_REVERSED_DEFAULT 3
 
 // Max unichars in a glyph.
 static const int kMaxParts = 20;
 
 typedef enum {
-    ColorModeNormal = 0,
-    ColorModeAlternate = 1,
+    ColorModeAlternate = 0,
+    ColorModeNormal = 1,
     ColorMode24bit = 2,
     ColorModeInvalid = 3
 } ColorMode;
@@ -268,8 +269,8 @@ static inline BOOL ForegroundAttributesEqual(const screen_char_t a,
 }
 
 static inline BOOL ScreenCharHasDefaultAttributesAndColors(const screen_char_t s) {
-    return (s.backgroundColor == ALTSEM_BG_DEFAULT &&
-            s.foregroundColor == ALTSEM_FG_DEFAULT &&
+    return (s.backgroundColor == ALTSEM_DEFAULT &&
+            s.foregroundColor == ALTSEM_DEFAULT &&
             s.backgroundColorMode == ColorModeAlternate &&
             s.foregroundColorMode == ColorModeAlternate &&
             !s.complexChar &&
@@ -349,7 +350,7 @@ void DumpScreenCharArray(screen_char_t* screenChars, int lineLength);
 // Pass prototype foreground and background colors in fg and bg.
 // *len is filled in with the number of elements of *buf that were set.
 // encoding is currently ignored and it's assumed to be UTF-16.
-// A good choice for ambiguousIsDoubleWidth is [SESSION doubleWidth].
+// A good choice for ambiguousIsDoubleWidth is [SESSION treatAmbiguousWidthAsDoubleWidth].
 // If not null, *cursorIndex gives an index into s and is changed into the
 //   corresponding index into buf.
 void StringToScreenChars(NSString *s,
@@ -358,7 +359,8 @@ void StringToScreenChars(NSString *s,
                          screen_char_t bg,
                          int *len,
                          BOOL ambiguousIsDoubleWidth,
-                         int* cursorIndex);
+                         int *cursorIndex,
+                         BOOL *foundDwc);
 
 // Translates normal characters into graphics characters, as defined in charsets.h. Must not contain
 // complex characters.
