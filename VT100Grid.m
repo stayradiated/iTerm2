@@ -1731,18 +1731,18 @@
         theLine[cx].code = AppendToComplexChar(theLine[cx].code,
                                                combiningChar);
     } else {
-        theLine[cx].code = BeginComplexChar(theLine[cx].code,
-                                            combiningChar);
-        theLine[cx].complexChar = YES;
+        BeginComplexChar(theLine + cx, combiningChar);
     }
     return YES;
 }
 
-void DumpBuf(screen_char_t* p, int n) {
+#ifdef VERBOSE_STRING
+static void DumpBuf(screen_char_t* p, int n) {
     for (int i = 0; i < n; ++i) {
         NSLog(@"%3d: \"%@\" (0x%04x)", i, ScreenCharToStr(&p[i]), (int)p[i].code);
     }
 }
+#endif
 
 - (void)erasePossibleSplitDwcAtLineNumber:(int)lineNumber {
     if (lineNumber < 0) {

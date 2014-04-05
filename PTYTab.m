@@ -319,7 +319,7 @@ static const BOOL USE_THIN_SPLITTERS = YES;
         [[aSession textview] refresh];
         [[aSession textview] setNeedsDisplay:YES];
     }
-    [self setLabelAttributes];
+    [self updateLabelAttributes];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"iTermSessionBecameKey"
                                                         object:activeSession_];
     // If the active session changed in the active tab in the key window then update the
@@ -564,9 +564,8 @@ static const BOOL USE_THIN_SPLITTERS = YES;
     return objectCount_;
 }
 
-- (int)objectCount
-{
-    return [[PreferencePanel sharedInstance] useCompactLabel] ? 0 : objectCount_;
+- (int)objectCount {
+    return [[PreferencePanel sharedInstance] hideTabNumber] ? 0 : objectCount_;
 }
 
 - (void)setObjectCount:(int)value
@@ -607,14 +606,19 @@ static const BOOL USE_THIN_SPLITTERS = YES;
     return ([[[self tabViewItem] tabView] selectedTabViewItem] == [self tabViewItem]);
 }
 
-- (BOOL)anySessionHasNewOutput
+- (BOOL)anySessionHasNewOutput:(BOOL *)okToNotify
 {
+    *okToNotify = NO;
+    BOOL result = NO;
     for (PTYSession* session in [self sessions]) {
         if ([session newOutput]) {
-            return YES;
+            if ([session shouldPostGrowlNotification]) {
+                *okToNotify = YES;
+            }
+            result = YES;
         }
     }
-    return NO;
+    return result;
 }
 
 static void SwapSize(NSSize* size) {
@@ -757,37 +761,35 @@ static NSString* FormatRect(NSRect r) {
     return [self _sessionAdjacentTo:session verticalDir:YES after:YES];
 }
 
-- (BOOL)setLabelAttributes
+- (BOOL)updateLabelAttributes
 {
-    PtyLog(@"PTYTab setLabelAttributes");
+    PtyLog(@"PTYTab updateLabelAttributes");
     struct timeval now;
-
+    BOOL needsFollowUp = NO;
+    
     gettimeofday(&now, NULL);
     if ([[self activeSession] exited]) {
         // Session has terminated.
-        [self _setLabelAttributesForDeadSession];
-        return NO;
-    } else if ([[tabViewItem_ tabView] selectedTabViewItem] != [self tabViewItem]) {
-        // We are not the foreground tab.
-        if (now.tv_sec > [[self activeSession] lastOutput].tv_sec+2) {
+        [self setLabelAttributesForDeadSession];
+    } else {
+        if (now.tv_sec > [[self activeSession] lastOutput].tv_sec + 2) {
             // At least two seconds have passed since the last call.
-            [self _setLabelAttributesForIdleBackgroundTabAtTime:now];
-            return NO;
+            [self setLabelAttributesForIdleTabAtTime:now];
         } else {
             // Less than 2 seconds has passed since the last output in the session.
-            if ([self anySessionHasNewOutput]) {
-                [self _setLabelAttributesForActiveBackgroundTab];
+            BOOL okToNotify;
+            if ([self anySessionHasNewOutput:&okToNotify]) {
+                [self setLabelAttributesForActiveTab:okToNotify];
             }
-            return YES;
+            needsFollowUp = YES;
         }
-    } else {
-        // This tab is the foreground tab and the session hasn't exited.
-        [self _setLabelAttributesForForegroundTab];
-        return NO;
+        // If possible, reset label attributes on this tab.
+        [self resetLabelAttributesIfAppropriate];
     }
+    return needsFollowUp;
 }
 
-- (void)closeSession:(PTYSession*)session;
+- (void)closeSession:(PTYSession*)session
 {
     [[self parentWindow] closeSession:session];
 }
@@ -1570,7 +1572,7 @@ static NSString* FormatRect(NSRect r) {
 
 - (void)_drawSession:(PTYSession*)session inImage:(NSImage*)viewImage atOrigin:(NSPoint)origin
 {
-    NSImage *textviewImage = [session imageOfSession:YES];
+    NSImage *textviewImage = [session snapshot];
 
     origin.y = [viewImage size].height - [textviewImage size].height - origin.y;
     [viewImage lockFocus];
@@ -2102,18 +2104,18 @@ static NSString* FormatRect(NSRect r) {
 
 - (void)notifyWindowChanged
 {
-  if (![self isTmuxTab]) {
-    return;
-  }
-  if (!flexibleView_) {
-    [self enableFlexibleView];
-  }
-  [self updateFlexibleViewColors];
-  [flexibleView_ setFrameSize:[[realParentWindow_ tabView] frame].size];
-  for (PTYSession *aSession in [self sessions]) {
-    [[aSession view] setAutoresizesSubviews:NO];  // This is ok because it is a tmux tab
-    [[aSession view] updateTitleFrame];
-  }
+    if (![self isTmuxTab]) {
+        return;
+    }
+    if (!flexibleView_) {
+        [self enableFlexibleView];
+    }
+    [self updateFlexibleViewColors];
+    [flexibleView_ setFrameSize:[[realParentWindow_ tabView] frame].size];
+    for (PTYSession *aSession in [self sessions]) {
+        [[aSession view] setAutoresizesSubviews:NO];  // This is ok because it is a tmux tab
+        [[aSession view] updateTitleFrame];
+    }
 }
 
 + (NSString *)htmlNameForColor:(NSColor *)color {
@@ -3702,7 +3704,8 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value)
         double currentSumOfSizes = 0;
         if (sizeChangeCoeff == 0) {
             // Original size was 0 so make all subviews equal.
-            for (NSView* aSubview in [splitView subviews]) {
+            const int numSubviews = [[splitView subviews] count];
+            for (int subviewNumber = 0; subviewNumber < numSubviews; subviewNumber++) {
                 const double size = lround(targetSize / n);
                 currentSumOfSizes += size;
                 [sizes addObject:[NSNumber numberWithDouble:size]];
@@ -3881,7 +3884,7 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value)
 
 #pragma mark - Private
 
-- (void)_setLabelAttributesForDeadSession
+- (void)setLabelAttributesForDeadSession
 {
     [parentWindow_ setLabelColor:deadStateColor
                  forTabViewItem:tabViewItem_];
@@ -3897,8 +3900,9 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value)
     return elapsed < (2 * kBackgroundSessionIntervalSec);
 }
 
-- (void)_setLabelAttributesForIdleBackgroundTabAtTime:(struct timeval)now
+- (void)setLabelAttributesForIdleTabAtTime:(struct timeval)now
 {
+    BOOL isBackgroundTab = [[tabViewItem_ tabView] selectedTabViewItem] != [self tabViewItem];
     if ([self isProcessing]) {
         [self setIsProcessing:NO];
     }
@@ -3906,47 +3910,49 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value)
     for (PTYSession* session in [self sessions]) {
         if ([session newOutput]) {
             // Idle after new output
-            if (![session growlIdle] &&
-                [[session screen] postGrowlNotifications] &&
+            if (!session.havePostedIdleNotification &&
+                [session shouldPostGrowlNotification] &&
                 [[NSDate date] timeIntervalSinceDate:[SessionView lastResizeDate]] > POST_WINDOW_RESIZE_SILENCE_SEC &&
                 now.tv_sec > [session lastOutput].tv_sec + 1) {
-                [[iTermGrowlDelegate sharedInstance] growlNotify:NSLocalizedStringFromTableInBundle(@"Idle",
-                                                                                                    @"iTerm",
-                                                                                                    [NSBundle bundleForClass:[self class]],
-                                                                                                    @"Growl Alerts")
-                                                 withDescription:[NSString stringWithFormat:NSLocalizedStringFromTableInBundle(@"Session %@ in tab #%d became idle.",
-                                                                                                                               @"iTerm",
-                                                                                                                               [NSBundle bundleForClass:[self class]],
-                                                                                                                               @"Growl Alerts"),
-                                                                  [[self activeSession] name],
-                                                                  [self realObjectCount]]
+                NSString *theDescription =
+                    [NSString stringWithFormat:@"Session %@ in tab #%d became idle.",
+                        [[self activeSession] name],
+                        [self realObjectCount]];
+                [[iTermGrowlDelegate sharedInstance] growlNotify:@"Idle"
+                                                 withDescription:theDescription
                                                  andNotification:@"Idle"
                                                      windowIndex:[session screenWindowIndex]
                                                         tabIndex:[session screenTabIndex]
                                                        viewIndex:[session screenViewIndex]];
-                [session setGrowlIdle:YES];
-                [session setGrowlNewOutput:NO];
+                session.havePostedIdleNotification = YES;
+                session.havePostedNewOutputNotification = NO;
             }
-            [parentWindow_ setLabelColor:idleStateColor
-                          forTabViewItem:tabViewItem_];
+            if (isBackgroundTab) {
+                [parentWindow_ setLabelColor:idleStateColor
+                              forTabViewItem:tabViewItem_];
+            }
         } else {
             // normal state
-            [parentWindow_ setLabelColor:normalStateColor
-                          forTabViewItem:tabViewItem_];
+            if (isBackgroundTab) {
+                [parentWindow_ setLabelColor:normalStateColor
+                              forTabViewItem:tabViewItem_];
+            }
         }
     }
 }
 
-- (void)_setLabelAttributesForActiveBackgroundTab
+- (void)setLabelAttributesForActiveTab:(BOOL)notify
 {
-    if ([self isProcessing] == NO &&
-        ![[PreferencePanel sharedInstance] useCompactLabel]) {
+    BOOL isBackgroundTab = [[tabViewItem_ tabView] selectedTabViewItem] != [self tabViewItem];
+    const BOOL compactTab = ([[PreferencePanel sharedInstance] hideTabNumber] &&
+                             [[PreferencePanel sharedInstance] hideTabCloseButton]);
+    if ([self isProcessing] == NO && !compactTab && ![self isForegroundTab]) {
         [self setIsProcessing:YES];
     }
 
-    if (![[self activeSession] growlNewOutput] &&
+    if (![[self activeSession] havePostedNewOutputNotification] &&
         [[self realParentWindow] broadcastMode] == BROADCAST_OFF &&
-        [[[self activeSession] screen] postGrowlNotifications] &&
+        notify &&
         [[NSDate date] timeIntervalSinceDate:[SessionView lastResizeDate]] > POST_WINDOW_RESIZE_SILENCE_SEC) {
         [[iTermGrowlDelegate sharedInstance] growlNotify:NSLocalizedStringFromTableInBundle(@"New Output",
                                                                                             @"iTerm",
@@ -3959,7 +3965,8 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value)
                                              windowIndex:[[self activeSession] screenWindowIndex]
                                                 tabIndex:[[self activeSession] screenTabIndex]
                                                viewIndex:[[self activeSession] screenViewIndex]];
-        [[self activeSession] setGrowlNewOutput:YES];
+        [[self activeSession] setHavePostedNewOutputNotification:YES];
+        [[self activeSession] setHavePostedIdleNotification:NO];
     }
 
     if ([self _windowResizedRecently]) {
@@ -3968,21 +3975,35 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value)
         for (PTYSession* session in [self sessions]) {
             [session setNewOutput:NO];
         }
-    } else {
+    } else if (isBackgroundTab) {
         [[self parentWindow] setLabelColor:newOutputStateColor
                             forTabViewItem:tabViewItem_];
     }
 }
 
-- (void)_setLabelAttributesForForegroundTab
+- (void)resetLabelAttributesIfAppropriate
 {
-    if ([self isProcessing]) {
-        [self setIsProcessing:NO];
+    BOOL amProcessing = [self isProcessing];
+    BOOL shouldResetLabel = NO;
+    for (PTYSession *aSession in [self sessions]) {
+        if (!amProcessing &&
+            !aSession.havePostedNewOutputNotification &&
+            !aSession.newOutput) {
+            // Avoid calling the potentially expensive -shouldPostGrowlNotification if there's
+            // nothing to do here, which is normal.
+            continue;
+        }
+        if (![aSession shouldPostGrowlNotification]) {
+            [aSession setHavePostedNewOutputNotification:NO];
+            [aSession setNewOutput:NO];
+            shouldResetLabel = YES;
+        }
     }
-    [[self activeSession] setGrowlNewOutput:NO];
-    [[self activeSession] setNewOutput:NO];
-    [[self parentWindow] setLabelColor:chosenStateColor
-                        forTabViewItem:[self tabViewItem]];
+    if (shouldResetLabel && [self isForegroundTab]) {
+        [self setIsProcessing:NO];
+        [[self parentWindow] setLabelColor:chosenStateColor
+                            forTabViewItem:[self tabViewItem]];
+    }
 }
 
 @end

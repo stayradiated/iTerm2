@@ -12,6 +12,7 @@
 #import "NSColor+iTerm.h"
 #import "NSDictionary+iTerm.h"
 #import "NSStringITerm.h"
+#import "NSView+iTerm.h"
 #import "NSView+RecursiveDescription.h"
 #import "PTYScrollView.h"
 #import "PTYTab.h"
@@ -19,7 +20,6 @@
 #import "PTYTextView.h"
 #import "PasteContext.h"
 #import "PasteEvent.h"
-#import "PasteViewController.h"
 #import "PreferencePanel.h"
 #import "ProcessCache.h"
 #import "SCPFile.h"
@@ -34,6 +34,7 @@
 #import "TmuxStateParser.h"
 #import "TmuxWindowOpener.h"
 #import "Trigger.h"
+#import "VT100RemoteHost.h"
 #import "VT100Screen.h"
 #import "VT100ScreenMark.h"
 #import "VT100Terminal.h"
@@ -45,8 +46,11 @@
 #import "iTermController.h"
 #import "iTermGrowlDelegate.h"
 #import "iTermKeyBindingMgr.h"
+#import "iTermPasteHelper.h"
 #import "iTermSelection.h"
+#import "iTermSettingsModel.h"
 #import "iTermTextExtractor.h"
+#import "iTermWarning.h"
 #import <apr-1/apr_base64.h>
 #include <stdlib.h>
 #include <sys/time.h>
@@ -85,7 +89,7 @@ typedef enum {
     TMUX_CLIENT  // Session mirrors a tmux virtual window
 } PTYSessionTmuxMode;
 
-@interface PTYSession ()
+@interface PTYSession () <iTermPasteHelperDelegate>
 @property(nonatomic, retain) Interval *currentMarkOrNotePosition;
 @property(nonatomic, retain) TerminalFile *download;
 @property(nonatomic, assign) int sessionID;
@@ -94,8 +98,7 @@ typedef enum {
 @property(atomic, assign) PTYSessionTmuxMode tmuxMode;
 @end
 
-@implementation PTYSession
-{
+@implementation PTYSession {
     // name can be changed by the host.
     NSString *_name;
 
@@ -159,10 +162,6 @@ typedef enum {
     // Is the update timer's callback currently running?
     BOOL _timerRunning;
 
-    // Paste from the head of this string from a timer until it's empty.
-    NSMutableString *_slowPasteBuffer;
-    NSTimer *_slowPasteTimer;
-
     // The name of the foreground job at the moment as best we can tell.
     NSString *_jobName;
 
@@ -194,10 +193,8 @@ typedef enum {
     int _tmuxPane;
     BOOL _tmuxSecureLogging;
 
-    NSMutableArray *_eventQueue;
-    PasteViewController *_pasteViewController;
-    PasteContext *_pasteContext;
-
+    iTermPasteHelper *_pasteHelper;
+    
     NSInteger _requestAttentionId;  // Last request-attention identifier
     VT100ScreenMark *_lastMark;
 
@@ -210,6 +207,16 @@ typedef enum {
     // Previous updateDisplay timer's timeout period (not the actual duration,
     // but the kXXXTimerIntervalSec value).
     NSTimeInterval _lastTimeout;
+    
+    // In order to correctly draw a tiled background image, we must first draw
+    // it into an image the size of the session view, and then blit from it
+    // onto the background of whichever view needs a background. This ensures
+    // the tesselation is consistent.
+    NSImage *_patternedImage;
+
+    // Mouse reporting state
+    VT100GridCoord _lastReportedCoord;
+    BOOL _reportingMouseDown;
 }
 
 - (id)init {
@@ -229,7 +236,8 @@ typedef enum {
 
         _lastOutput = _lastInput;
         _lastUpdate = _lastInput;
-        _eventQueue = [[NSMutableArray alloc] init];
+        _pasteHelper = [[iTermPasteHelper alloc] init];
+        _pasteHelper.delegate = self;
         _colorMap = [[iTermColorMap alloc] init];
         // Allocate screen, shell, and terminal objects
         _shell = [[PTYTask alloc] init];
@@ -238,7 +246,6 @@ typedef enum {
         NSParameterAssert(_shell != nil && _terminal != nil && _screen != nil);
 
         _overriddenFields = [[NSMutableSet alloc] init];
-        _slowPasteBuffer = [[NSMutableString alloc] init];
         _creationDate = [[NSDate date] retain];
         _tmuxSecureLogging = NO;
         _tailFindContext = [[FindContext alloc] init];
@@ -259,6 +266,10 @@ typedef enum {
                                                  selector:@selector(synchronizeTmuxFonts:)
                                                      name:kTmuxFontChanged
                                                    object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(terminalFileShouldStop:)
+                                                     name:kTerminalFileShouldStopNotification
+                                                   object:nil];
     }
     return self;
 }
@@ -273,10 +284,6 @@ typedef enum {
     [_triggers release];
     [_pasteboard release];
     [_pbtext release];
-    [_slowPasteBuffer release];
-    if (_slowPasteTimer) {
-        [_slowPasteTimer invalidate];
-    }
     [_creationDate release];
     [_lastActiveAt release];
     [_bookmarkName release];
@@ -288,8 +295,10 @@ typedef enum {
     [_iconTitleStack release];
     [_profile release];
     [_overriddenFields release];
-    [_eventQueue release];
+    _pasteHelper.delegate = nil;
+    [_pasteHelper release];
     [_backgroundImagePath release];
+    [_backgroundImage release];
     [_antiIdleTimer invalidate];
     [_antiIdleTimer release];
     [_updateTimer invalidate];
@@ -299,8 +308,6 @@ typedef enum {
     [_tmuxGateway release];
     [_tmuxController release];
     [_sendModifiers release];
-    [_pasteViewController release];
-    [_pasteContext release];
     [_download stop];
     [_download endOfData];
     [_download release];
@@ -310,6 +317,7 @@ typedef enum {
     [_tailFindContext release];
     _currentMarkOrNotePosition = nil;
     [_lastMark release];
+    [_patternedImage release];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 
     if (_dvrDecoder) {
@@ -368,10 +376,8 @@ typedef enum {
 
     }
     if (dir > 0) {
-        if (![_dvrDecoder next] || [_dvrDecoder timestamp] == [_dvr lastTimeStamp]) {
-            // Switch to the live view
-            [[[self tab] realParentWindow] showLiveSession:_liveSession inPlaceOf:self];
-            return;
+        if (![_dvrDecoder next]) {
+            NSBeep();
         }
     } else {
         if (![_dvrDecoder prev]) {
@@ -738,33 +744,24 @@ typedef enum {
 // tic -e xterm-256color $FILENAME
 - (void)_maybeAskAboutInstallXtermTerminfo
 {
-    NSString* NEVER_WARN = @"NeverWarnAboutXterm256ColorTerminfo";
-    if ([[NSUserDefaults standardUserDefaults] objectForKey:NEVER_WARN]) {
-        return;
-    }
-
     NSString* filename = [[NSBundle bundleForClass:[self class]] pathForResource:@"xterm-terminfo" ofType:@"txt"];
     if (!filename) {
         return;
     }
     NSString* cmd = [NSString stringWithFormat:@"tic -e xterm-256color %@", [filename stringWithEscapedShellCharacters]];
     if (system("infocmp xterm-256color > /dev/null")) {
-        switch (NSRunAlertPanel(@"Warning",
-                                @"The terminfo file for the terminal type you're using, \"xterm-256color\", is not installed on your system. Would you like to install it now?",
-                                @"Install",
-                                @"Never ask me again",
-                                @"Not Now",
-                                nil)) {
-            case NSAlertDefaultReturn:
-                if (system([cmd UTF8String])) {
-                    NSRunAlertPanel(@"Error",
-                                    [NSString stringWithFormat:@"Sorry, an error occurred while running: %@", cmd],
-                                    @"Ok", nil, nil);
-                }
-                break;
-            case NSAlertAlternateReturn:
-                [[NSUserDefaults standardUserDefaults] setObject:[NSNumber numberWithBool:YES] forKey:NEVER_WARN];
-                break;
+        iTermWarningSelection selection =
+            [iTermWarning showWarningWithTitle:@"The terminfo file for the terminal type you're using, \"xterm-256color\", is"
+                                               @"not installed on your system. Would you like to install it now?"
+                                       actions:@[ @"Install", @"Do not Install" ]
+                                    identifier:@"NeverWarnAboutXterm256ColorTerminfo"
+                                   silenceable:kiTermWarningTypePermanentlySilenceable];
+        if (selection == kiTermWarningSelection0) {
+            if (system([cmd UTF8String])) {
+                NSRunAlertPanel(@"Error",
+                                @"Sorry, an error occurred while running: %@",
+                                @"OK", nil, nil, cmd);
+            }
         }
     }
 }
@@ -784,7 +781,7 @@ typedef enum {
 }
 
 - (BOOL)shouldSetCtype {
-    return ![[NSUserDefaults standardUserDefaults] boolForKey:@"DoNotSetCtype"];
+    return ![iTermSettingsModel doNotSetCtype];
 }
 
 - (void)startProgram:(NSString *)program
@@ -891,16 +888,15 @@ typedef enum {
     if ([[NSDate date] timeIntervalSinceDate:_creationDate] < 3) {
         NSString* theName = [_profile objectForKey:KEY_NAME];
         NSString* theKey = [NSString stringWithFormat:@"NeverWarnAboutShortLivedSessions_%@", [_profile objectForKey:KEY_GUID]];
-        if (![[[NSUserDefaults standardUserDefaults] objectForKey:theKey] boolValue]) {
-            if (NSRunAlertPanel(@"Short-Lived Session Warning",
-                                [NSString stringWithFormat:@"A session ended very soon after starting. Check that the command in profile \"%@\" is correct.", theName],
-                                @"Ok",
-                                @"Don't Warn Again for This Profile",
-                                nil) != NSAlertDefaultReturn) {
-                [[NSUserDefaults standardUserDefaults] setObject:[NSNumber numberWithBool:YES] forKey:theKey];
-            }
-        }
-    }
+        NSString *theTitle = [NSString stringWithFormat:
+                              @"A session ended very soon after starting. Check that the command "
+                              @"in profile \"%@\" is correct.",
+                              theName];
+        [iTermWarning showWarningWithTitle:theTitle
+                                   actions:@[ @"OK" ]
+                                identifier:theKey
+                               silenceable:kiTermWarningTypePermanentlySilenceable];
+ }
 }
 
 // Terminate a replay session but not the live session
@@ -918,9 +914,7 @@ typedef enum {
     if (_exited) {
         [self _maybeWarnAboutShortLivedSessions];
     }
-    BOOL isClient = NO;
     if (self.tmuxMode == TMUX_CLIENT) {
-        isClient = YES;
         assert([_tab tmuxWindow] >= 0);
         [_tmuxController deregisterWindow:[_tab tmuxWindow]
                                windowPane:_tmuxPane];
@@ -992,11 +986,7 @@ typedef enum {
     [_updateTimer release];
     _updateTimer = nil;
 
-    if (_slowPasteTimer) {
-        [_slowPasteTimer invalidate];
-        _slowPasteTimer = nil;
-        [_eventQueue removeAllObjects];
-    }
+    [_pasteHelper abort];
 
     [[_tab realParentWindow]  sessionDidTerminate:self];
 
@@ -1008,7 +998,7 @@ typedef enum {
     static BOOL checkedDebug;
     static BOOL debugKeyDown;
     if (!checkedDebug) {
-        debugKeyDown = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DebugKeyDown"] boolValue];
+        debugKeyDown = [iTermSettingsModel debugKeyDown];
         checkedDebug = YES;
     }
     if (debugKeyDown || gDebugLogging) {
@@ -1064,7 +1054,7 @@ typedef enum {
         [self printTmuxMessage:[NSString stringWithFormat:@"tmux logging %@", (_tmuxGateway.tmuxLogging ? @"on" : @"off")]];
     } else if (unicode == 'C') {
         NSAlert *alert = [NSAlert alertWithMessageText:@"Enter command to send tmux:"
-                                         defaultButton:@"Ok"
+                                         defaultButton:@"OK"
                                        alternateButton:@"Cancel"
                                            otherButton:nil
                              informativeTextWithFormat:@""];
@@ -1159,6 +1149,7 @@ typedef enum {
         }
         
         VT100Token *token = CVectorGetObject(vector, i);
+        DLog(@"Execute token %@ cursor=(%d, %d)", token, _screen.cursorX - 1, _screen.cursorY - 1);
         [_terminal executeToken:token];
     }
     
@@ -1218,15 +1209,9 @@ typedef enum {
     }
 }
 
-- (BOOL)_growlOnForegroundTabs
-{
-    return [[[NSUserDefaults standardUserDefaults] objectForKey:@"GrowlOnForegroundTabs"] boolValue];
-}
-
 - (void)brokenPipe
 {
-    if (_screen.postGrowlNotifications &&
-        (![[self tab] isForegroundTab] || [self _growlOnForegroundTabs])) {
+    if ([self shouldPostGrowlNotification]) {
         [[iTermGrowlDelegate sharedInstance] growlNotify:@"Session Ended"
                                          withDescription:[NSString stringWithFormat:@"Session \"%@\" in tab #%d just terminated.",
                                                           [self name],
@@ -1235,7 +1220,7 @@ typedef enum {
     }
 
     _exited = YES;
-    [[self tab] setLabelAttributes];
+    [[self tab] updateLabelAttributes];
 
     if ([self autoClose]) {
         [[self tab] closeSession:self];
@@ -1364,7 +1349,7 @@ typedef enum {
 + (BOOL)_recursiveSelectMenuItem:(NSString*)theName inMenu:(NSMenu*)menu
 {
     for (NSMenuItem* item in [menu itemArray]) {
-        if (![item isEnabled] || [item isHidden] || [item isAlternate]) {
+        if (![item isEnabled] || [item isHidden]) {
             continue;
         }
         if ([item hasSubmenu]) {
@@ -1465,22 +1450,6 @@ typedef enum {
     [self writeTask:[_terminal.output keyPageDown:0]];
 }
 
-- (void)emptyEventQueue {
-    int eventsSent = 0;
-    for (NSEvent *event in _eventQueue) {
-        ++eventsSent;
-        if ([event isKindOfClass:[PasteEvent class]]) {
-            PasteEvent *pasteEvent = (PasteEvent *)event;
-            [self pasteString:pasteEvent.string flags:pasteEvent.flags];
-            // Can't empty while pasting.
-            break;
-        } else {
-            [_textview keyDown:event];
-        }
-    }
-    [_eventQueue removeObjectsInRange:NSMakeRange(0, eventsSent)];
-}
-
 + (NSData *)pasteboardFile
 {
     NSPasteboard *board;
@@ -1566,28 +1535,6 @@ typedef enum {
     }
 }
 
-- (void)showPasteUI {
-    _pasteViewController = [[PasteViewController alloc] initWithContext:_pasteContext
-                                                                 length:_slowPasteBuffer.length];
-    _pasteViewController.delegate = self;
-    _pasteViewController.view.frame = NSMakeRect(20,
-                                                 _view.frame.size.height - _pasteViewController.view.frame.size.height,
-                                                 _pasteViewController.view.frame.size.width,
-                                                 _pasteViewController.view.frame.size.height);
-    [_view addSubview:_pasteViewController.view];
-    [_pasteViewController updateFrame];
-}
-
-- (void)hidePasteUI {
-    [_pasteViewController close];
-    [_pasteViewController release];
-    _pasteViewController = nil;
-}
-
-- (void)updatePasteUI {
-    [_pasteViewController setRemainingLength:_slowPasteBuffer.length];
-}
-
 - (NSData *)dataByRemovingControlCodes:(NSData *)data {
     NSMutableData *output = [NSMutableData dataWithCapacity:[data length]];
     const unsigned char *p = data.bytes;
@@ -1607,105 +1554,9 @@ typedef enum {
     return output;
 }
 
-- (void)_pasteStringImmediately:(NSString*)aString
-{
-    if ([aString length] > 0) {
-        NSData *data = [aString dataUsingEncoding:[_terminal encoding]
-                             allowLossyConversion:YES];
-        NSData *safeData = [self dataByRemovingControlCodes:data];
-        [self writeTask:safeData];
-
-    }
-}
-
-- (void)_pasteAgain {
-    NSRange range;
-    range.location = 0;
-    range.length = MIN(_pasteContext.bytesPerCall, [_slowPasteBuffer length]);
-    [self _pasteStringImmediately:[_slowPasteBuffer substringWithRange:range]];
-    [_slowPasteBuffer deleteCharactersInRange:range];
-    [self updatePasteUI];
-    if ([_slowPasteBuffer length] > 0) {
-        [_pasteContext updateValues];
-        _slowPasteTimer = [NSTimer scheduledTimerWithTimeInterval:_pasteContext.delayBetweenCalls
-                                                           target:self
-                                                         selector:@selector(_pasteAgain)
-                                                         userInfo:nil
-                                                          repeats:NO];
-    } else {
-        if ([_terminal bracketedPasteMode]) {
-            [self writeTask:[[NSString stringWithFormat:@"%c[201~", 27]
-                             dataUsingEncoding:[_terminal encoding]
-                             allowLossyConversion:YES]];
-        }
-        _slowPasteTimer = nil;
-        [self hidePasteUI];
-        [_pasteContext release];
-        _pasteContext = nil;
-        [self emptyEventQueue];
-    }
-}
-
-- (void)_pasteWithBytePerCallPrefKey:(NSString*)bytesPerCallKey
-                        defaultValue:(int)bytesPerCallDefault
-            delayBetweenCallsPrefKey:(NSString*)delayBetweenCallsKey
-                        defaultValue:(float)delayBetweenCallsDefault
-{
-    [_pasteContext release];
-    _pasteContext = [[PasteContext alloc] initWithBytesPerCallPrefKey:bytesPerCallKey
-                                                         defaultValue:bytesPerCallDefault
-                                             delayBetweenCallsPrefKey:delayBetweenCallsKey
-                                                         defaultValue:delayBetweenCallsDefault];
-    const int kPasteBytesPerSecond = 10000;  // This is a wild-ass guess.
-    if (_pasteContext.delayBetweenCalls * _slowPasteBuffer.length / _pasteContext.bytesPerCall + _slowPasteBuffer.length / kPasteBytesPerSecond > 3) {
-        [self showPasteUI];
-    }
-
-    [self _pasteAgain];
-}
-
-// Outputs 16 bytes every 125ms so that clients that don't buffer input can handle pasting large buffers.
-// Override the constants by setting defaults SlowPasteBytesPerCall and SlowPasteDelayBetweenCalls
-- (void)_pasteSlowly:(id)sender
-{
-    [self _pasteWithBytePerCallPrefKey:@"SlowPasteBytesPerCall"
-                          defaultValue:16
-              delayBetweenCallsPrefKey:@"SlowPasteDelayBetweenCalls"
-                          defaultValue:0.125];
-}
-
-- (void)_pasteStringMore
-{
-    [self _pasteWithBytePerCallPrefKey:@"QuickPasteBytesPerCall"
-                          defaultValue:1024
-              delayBetweenCallsPrefKey:@"QuickPasteDelayBetweenCalls"
-                          defaultValue:0.01];
-}
-
-- (void)_pasteString:(NSString *)aString
-{
-    if ([aString length] > 0) {
-        // This is the "normal" way of pasting. It's fast but tends not to
-        // outrun a shell's ability to read from its buffer. Why this crazy
-        // thing? See bug 1031.
-        [_slowPasteBuffer appendString:[aString stringWithLinefeedNewlines]];
-        [self _pasteStringMore];
-    } else {
-        NSBeep();
-    }
-}
-
 - (void)pasteString:(NSString *)aString
 {
-    if (![self maybeWarnAboutMultiLinePaste:aString]) {
-        return;
-    }
-    if ([_terminal bracketedPasteMode]) {
-        [self writeTask:[[NSString stringWithFormat:@"%c[200~", 27]
-                         dataUsingEncoding:[_terminal encoding]
-                         allowLossyConversion:YES]];
-    }
-    [self _pasteString:aString];
+    [self pasteString:aString flags:0];
 }
 
 - (void)deleteBackward:(id)sender
@@ -1722,13 +1573,6 @@ typedef enum {
     [self writeTask:[NSData dataWithBytes:&p length:1]];
 }
 
-- (void)textViewDidChangeSelection:(NSNotification *) aNotification
-{
-    if ([[PreferencePanel sharedInstance] copySelection]) {
-        [_textview copySelectionAccordingToUserPreferences];
-    }
-}
-
 - (PTYScroller *)textViewVerticalScroller
 {
     return (PTYScroller *)[_scrollview verticalScroller];
@@ -1738,16 +1582,16 @@ typedef enum {
     return [_shell hasCoprocess];
 }
 
-- (void) textViewResized:(NSNotification *) aNotification;
-{
-    int w;
-    int h;
-
-    w = (int)(([[_scrollview contentView] frame].size.width - MARGIN * 2) / [_textview charWidth]);
-    h = (int)(([[_scrollview contentView] frame].size.height) / [_textview lineHeight]);
-    //NSLog(@"%s: w = %d; h = %d; old w = %d; old h = %d", __PRETTY_FUNCTION__, w, h, [_screen width], [_screen height]);
-
-    [self setWidth:w height:h];
+- (BOOL)shouldPostGrowlNotification {
+    if (!_screen.postGrowlNotifications) {
+        return NO;
+    }
+    if (![[self tab] isForegroundTab]) {
+        return YES;
+    }
+    BOOL windowIsObscured =
+        ([[iTermController sharedInstance] terminalIsObscured:self.tab.realParentWindow]);
+    return (windowIsObscured);
 }
 
 - (void)setBell:(BOOL)flag
@@ -1757,8 +1601,7 @@ typedef enum {
         [[self tab] setBell:flag];
         if (_bell) {
             if ([_textview keyIsARepeat] == NO &&
-                ![[_textview window] isKeyWindow] &&
-                _screen.postGrowlNotifications) {
+                [self shouldPostGrowlNotification]) {
                 [[iTermGrowlDelegate sharedInstance] growlNotify:@"Bell"
                                                  withDescription:[NSString stringWithFormat:@"Session %@ #%d just rang a bell!",
                                                                   [self name],
@@ -2304,35 +2147,22 @@ typedef enum {
 - (void)setBackgroundImagePath:(NSString *)imageFilePath
 {
     if ([imageFilePath length]) {
-        [imageFilePath retain];
-        [_backgroundImagePath autorelease];
-        _backgroundImagePath = nil;
-
         if ([imageFilePath isAbsolutePath] == NO) {
             NSBundle *myBundle = [NSBundle bundleForClass:[self class]];
-            _backgroundImagePath = [myBundle pathForResource:imageFilePath ofType:@""];
-            [imageFilePath autorelease];
-            [_backgroundImagePath retain];
-        } else {
-            _backgroundImagePath = imageFilePath;
+            imageFilePath = [myBundle pathForResource:imageFilePath ofType:@""];
         }
-        NSImage *anImage = [[NSImage alloc] initWithContentsOfFile:_backgroundImagePath];
-        if (anImage != nil) {
-            [_scrollview setDrawsBackground:NO];
-            [_scrollview setBackgroundImage:anImage asPattern:[self backgroundImageTiled]];
-            [anImage release];
-        } else {
-            [_scrollview setDrawsBackground:YES];
-            [_backgroundImagePath autorelease];
-            _backgroundImagePath = nil;
-        }
-    } else {
-        [_scrollview setDrawsBackground:YES];
-        [_scrollview setBackgroundImage:nil];
         [_backgroundImagePath autorelease];
+        _backgroundImagePath = [imageFilePath copy];
+        self.backgroundImage = [[[NSImage alloc] initWithContentsOfFile:_backgroundImagePath] autorelease];
+    } else {
+        self.backgroundImage = nil;
+        [_backgroundImagePath release];
         _backgroundImagePath = nil;
     }
 
+    [_patternedImage release];
+    _patternedImage = nil;
+    
     [_textview setNeedsDisplay:YES];
 }
 
@@ -2359,10 +2189,8 @@ typedef enum {
     if (transparency > 0.9) {
         transparency = 0.9;
     }
-
-    // set transparency of background image
-    [_scrollview setTransparency:transparency];
     [_textview setTransparency:transparency];
+    [[[self tab] realParentWindow] updateContentShadow];
 }
 
 - (float)blend
@@ -2387,7 +2215,7 @@ typedef enum {
     }
 
     if (set) {
-        _antiIdleTimer = [[NSTimer scheduledTimerWithTimeInterval:30
+        _antiIdleTimer = [[NSTimer scheduledTimerWithTimeInterval:[[PreferencePanel sharedInstance] antiIdleTimerPeriod]
                                                            target:self
                                                          selector:@selector(doAntiIdle)
                                                          userInfo:nil
@@ -2593,11 +2421,9 @@ static long long timeInTenthsOfSeconds(struct timeval t)
         anotherUpdateNeeded = YES;
     }
 
-    BOOL isForegroundTab = [[self tab] isForegroundTab];
-    if (!isForegroundTab) {
-        // Set color, other attributes of a background tab.
-        anotherUpdateNeeded |= [[self tab] setLabelAttributes];
-    }
+    // Set color, other attributes of a tab.
+    anotherUpdateNeeded |= [[self tab] updateLabelAttributes];
+
     if ([[self tab] activeSession] == self) {
         // Update window info for the active tab.
         struct timeval now;
@@ -2606,7 +2432,7 @@ static long long timeInTenthsOfSeconds(struct timeval t)
             timeInTenthsOfSeconds(now) >= timeInTenthsOfSeconds(_lastUpdate) + 7) {
             // It has been more than 700ms since the last time we were here or
             // the job doesn't have a name
-            if (isForegroundTab && [[[self tab] parentWindow] tempTitle]) {
+            if ([[self tab] isForegroundTab] && [[[self tab] parentWindow] tempTitle]) {
                 // Revert to the permanent tab title.
                 [[[self tab] parentWindow] setWindowTitle];
                 [[[self tab] parentWindow] resetTempTitle];
@@ -2776,6 +2602,15 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     }
     DLog(@"After:\n%@", [window.contentView iterm_recursiveDescription]);
     DLog(@"Window frame: %@", window);
+}
+
+- (void)terminalFileShouldStop:(NSNotification *)notification
+{
+  if ([notification object] == _download) {
+        [_screen.terminal stopReceivingFile];
+        [_download endOfData];
+        self.download = nil;
+    }
 }
 
 - (void)synchronizeTmuxFonts:(NSNotification *)notification
@@ -3038,37 +2873,20 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     [_textview clearHighlights];
 }
 
+- (NSImage *)snapshot {
+    [_textview refresh];
+    return [_view snapshot];
+}
+
 - (NSImage *)dragImage
 {
-    NSImage *image = [self imageOfSession:YES];
+    NSImage *image = [self snapshot];
+    // Dial the alpha down to 50%
     NSImage *dragImage = [[[NSImage alloc] initWithSize:[image size]] autorelease];
     [dragImage lockFocus];
     [image compositeToPoint:NSZeroPoint fromRect:NSZeroRect operation:NSCompositeSourceOver fraction:0.5];
     [dragImage unlockFocus];
     return dragImage;
-}
-
-- (NSImage *)imageOfSession:(BOOL)flip
-{
-    [_textview refresh];
-    NSRect theRect = [_scrollview documentVisibleRect];
-    NSImage *textviewImage = [[[NSImage alloc] initWithSize:theRect.size] autorelease];
-
-    [textviewImage lockFocus];
-    if (flip) {
-        NSAffineTransform *transform = [NSAffineTransform transform];
-        [transform scaleXBy:1.0 yBy:-1];
-        [transform translateXBy:0 yBy:-theRect.size.height];
-        [transform concat];
-    }
-
-    [_textview drawBackground:theRect toPoint:NSMakePoint(0, 0)];
-    // Draw the background flipped, which is actually the right way up.
-    NSPoint temp = NSMakePoint(0, 0);
-    [_textview drawRect:theRect to:&temp];
-    [textviewImage unlockFocus];
-
-    return textviewImage;
 }
 
 - (void)setPasteboard:(NSString *)pbName
@@ -3147,22 +2965,24 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     [[[_tab realParentWindow] window] miniaturize:self];
 }
 
+- (NSString *)preferredTmuxClientName {
+    VT100RemoteHost *remoteHost = [self currentHost];
+    if (remoteHost) {
+        return [NSString stringWithFormat:@"%@@%@", remoteHost.username, remoteHost.hostname];
+    } else {
+        return _name;
+    }
+}
+
 - (void)startTmuxMode
 {
-    if ([[TmuxControllerRegistry sharedInstance] numberOfClients]) {
-        const char *message = "detach\n";
-        [self printTmuxMessage:@"Can't enter tmux mode: another tmux is already attached"];
-        [_screen crlf];
-        [self writeTaskImpl:[NSData dataWithBytes:message length:strlen(message)]];
-        return;
-    }
-
     if (self.tmuxMode != TMUX_NONE) {
         return;
     }
     self.tmuxMode = TMUX_GATEWAY;
     _tmuxGateway = [[TmuxGateway alloc] initWithDelegate:self];
-    _tmuxController = [[TmuxController alloc] initWithGateway:_tmuxGateway];
+    _tmuxController = [[TmuxController alloc] initWithGateway:_tmuxGateway
+                                                   clientName:[self preferredTmuxClientName]];
     _tmuxController.ambiguousIsDoubleWidth = _treatAmbiguousWidthAsDoubleWidth;
     NSSize theSize;
     Profile *tmuxBookmark = [PTYTab tmuxBookmark];
@@ -3450,6 +3270,15 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     [self writeTaskImpl:data];
 }
 
++ (dispatch_queue_t)tmuxQueue {
+    static dispatch_queue_t tmuxQueue;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        tmuxQueue = dispatch_queue_create("com.iterm2.tmuxReadTask", 0);
+    });
+    return tmuxQueue;
+}
+
 // This is called on the main thread.
 - (void)tmuxReadTask:(NSData *)data
 {
@@ -3460,7 +3289,7 @@ static long long timeInTenthsOfSeconds(struct timeval t)
         // which would deadlock if it were called on the main thread.
         [data retain];
         [self retain];
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        dispatch_async([[self class] tmuxQueue], ^{
             [self threadedReadTask:(char *)[data bytes] length:[data length]];
             [data release];
             [self release];
@@ -3506,16 +3335,6 @@ static long long timeInTenthsOfSeconds(struct timeval t)
         }
 }
 
-- (void)pasteViewControllerDidCancel
-{
-    [self hidePasteUI];
-    [_slowPasteTimer invalidate];
-    _slowPasteTimer = nil;
-    [_slowPasteBuffer release];
-    _slowPasteBuffer = [[NSMutableString alloc] init];
-    [self emptyEventQueue];
-}
-
 - (NSString*)encodingName
 {
     // Get the encoding, perhaps as a fully written out name.
@@ -3559,18 +3378,18 @@ static long long timeInTenthsOfSeconds(struct timeval t)
 #pragma mark PTYTextViewDelegate
 
 - (BOOL)isPasting {
-    return _slowPasteTimer != nil;
+    return _pasteHelper.isPasting;
 }
 
 - (void)queueKeyDown:(NSEvent *)event {
-    [_eventQueue addObject:event];
+    [_pasteHelper enqueueEvent:event];
 }
 
 // Handle bookmark- and global-scope keybindings. If there is no keybinding then
 // pass the keystroke as input.
 - (void)keyDown:(NSEvent *)event
 {
-  BOOL debugKeyDown = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DebugKeyDown"] boolValue];
+  BOOL debugKeyDown = [iTermSettingsModel debugKeyDown];
   unsigned char *send_str = NULL;
   unsigned char *dataPtr = NULL;
   int dataLength = 0;
@@ -4101,75 +3920,17 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     }
 }
 
-- (BOOL)maybeWarnAboutMultiLinePaste:(NSString *)string
+// Pastes a specific string. All pastes go through this method. Adds to the event queue if a paste
+// is in progress.
+- (void)pasteString:(NSString *)theString flags:(PTYSessionPasteFlags)flags
 {
-    iTermApplicationDelegate *ad = [[NSApplication sharedApplication] delegate];
-    if (![ad warnBeforeMultiLinePaste]) {
-        return YES;
-    }
-
-    if ([string rangeOfString:@"\n"].length == 0) {
-        return YES;
-    }
-
-    switch (NSRunAlertPanel(@"Confirm Multi-Line Paste",
-                            @"Ok to paste %d lines?",
-                            @"Yes",
-                            @"No",
-                            @"Yes and don‘t ask again",
-                            (int)[[string componentsSeparatedByString:@"\n"] count])) {
-        case NSAlertDefaultReturn:
-            return YES;
-        case NSAlertAlternateReturn:
-            return NO;
-        case NSAlertOtherReturn:
-            [ad toggleMultiLinePasteWarning:nil];
-            return YES;
-    }
-
-    assert(false);
-    return YES;
-}
-
-// Pastes a specific string. The API for pasting not-from-clipboard. All pastes go through here.
-// If queued, this is called just before the paste occurs, not when getting queued.
-- (void)pasteString:(NSString *)str flags:(int)flags
-{
-    if (![self maybeWarnAboutMultiLinePaste:str]) {
-        return;
-    }
-    if (flags & 1) {
-        // paste escaping special characters
-        str = [str stringWithEscapedShellCharacters];
-    }
-    if ([_terminal bracketedPasteMode]) {
-        [self writeTask:[[NSString stringWithFormat:@"%c[200~", 27]
-                         dataUsingEncoding:[_terminal encoding]
-                         allowLossyConversion:YES]];
-    }
-    if (flags & 2) {
-        [_slowPasteBuffer appendString:[str stringWithLinefeedNewlines]];
-        [self _pasteSlowly:nil];
-    } else {
-        [self _pasteString:str];
-    }
+    [_pasteHelper pasteString:theString flags:flags];
 }
 
 // Pastes the current string in the clipboard. Uses the sender's tag to get flags.
 - (void)paste:(id)sender
 {
-    NSString* pbStr = [PTYSession pasteboardString];
-    if (pbStr) {
-        if ([self isPasting]) {
-            if ([pbStr length] == 0) {
-                NSBeep();
-            } else {
-                [_eventQueue addObject:[PasteEvent pasteEventWithString:pbStr flags:[sender tag]]];
-            }
-        } else {
-            [self pasteString:pbStr flags:[sender tag]];
-        }
-    }
+    [self pasteString:[PTYSession pasteboardString] flags:[sender tag]];
 }
 
 - (void)textViewFontDidChange
@@ -4183,6 +3944,109 @@ static long long timeInTenthsOfSeconds(struct timeval t)
 - (void)textViewSizeDidChange
 {
     [_view updateScrollViewFrame];
+}
+
+- (BOOL)textViewHasBackgroundImage {
+    return _backgroundImage != nil;
+}
+
+- (NSImage *)patternedImage {
+    // If there is a tiled background image, tesselate _backgroundImage onto
+    // _patternedImage, which will be the source for future background image
+    // drawing operations.
+    if (!_patternedImage || !NSEqualSizes(_patternedImage.size, _view.contentRect.size)) {
+        [_patternedImage release];
+        _patternedImage = [[NSImage alloc] initWithSize:_view.contentRect.size];
+        [_patternedImage lockFocus];
+        NSColor *pattern = [NSColor colorWithPatternImage:_backgroundImage];
+        [pattern drawSwatchInRect:NSMakeRect(0,
+                                             0,
+                                             _patternedImage.size.width,
+                                             _patternedImage.size.height)];
+        [_patternedImage unlockFocus];
+    }
+    return _patternedImage;
+}
+
+// Lots of different views need to draw the background image.
+// - Obviously, PTYTextView uses it for the area where text appears.
+// - SessionView will draw it for an area below the scroll view when the cell size doesn't evenly
+// divide its size.
+// - TextViewWrapper will draw it for a few pixels above the scrollview in the VMARGIN.
+// This combines drawing into these different views in a consistent way.
+// It also draws the dotted border when there is a maximized pane.
+//
+// view: the view whose -drawRect is currently running and is being drawn into.
+// rect: the rectangle in the coordinate system of |view|.
+// blendDefaultBackground: If set, the default background color will be blended over the background
+// image. If there is no image and this flag is set then the background color is drawn instead. This
+// way SessionView and TextViewWrapper don't have to worry about whether a background image is
+// present.
+- (void)textViewDrawBackgroundImageInView:(NSView *)view
+                                 viewRect:(NSRect)rect
+                   blendDefaultBackground:(BOOL)blendDefaultBackground {
+    const float alpha = _textview.useTransparency ? (1.0 - _textview.transparency) : 1.0;
+    if (_backgroundImage) {
+        NSRect localRect = [_view convertRect:rect fromView:view];
+        NSImage *image;
+        if (_backgroundImageTiled) {
+            image = [self patternedImage];
+        } else {
+            image = _backgroundImage;
+        }
+        double dx = image.size.width / _view.frame.size.width;
+        double dy = image.size.height / _view.frame.size.height;
+        
+        NSRect sourceRect = NSMakeRect(localRect.origin.x * dx,
+                                       localRect.origin.y * dy,
+                                       localRect.size.width * dx,
+                                       localRect.size.height * dy);
+        [image drawInRect:rect
+                 fromRect:sourceRect
+                operation:NSCompositeCopy
+                 fraction:alpha
+           respectFlipped:YES
+                    hints:nil];
+        
+        if (blendDefaultBackground) {
+            // Blend default background color over background image.
+            [[_textview.dimmedDefaultBackgroundColor colorWithAlphaComponent:1 - _textview.blend] set];
+            NSRectFillUsingOperation(rect, NSCompositeSourceOver);
+        }
+    } else if (blendDefaultBackground) {
+        // No image, so just draw background color.
+        [[_textview.dimmedDefaultBackgroundColor colorWithAlphaComponent:alpha] set];
+        NSRectFill(rect);
+    }
+    
+    [self drawMaximizedPaneDottedOutlineIndicatorInView:view];
+}
+
+- (void)drawMaximizedPaneDottedOutlineIndicatorInView:(NSView *)view {
+    if ([self textViewTabHasMaximizedPanel]) {
+        NSColor *color = [_colorMap colorForKey:kColorMapBackground];
+        double grayLevel = [color isDark] ? 1 : 0;
+        color = [color colorDimmedBy:0.2 towardsGrayLevel:grayLevel];
+        NSRect frame = [_view convertRect:[_view contentRect] toView:view];
+
+        NSBezierPath *path = [[[NSBezierPath alloc] init] autorelease];
+        CGFloat left = frame.origin.x + 0.5;
+        CGFloat right = frame.origin.x + frame.size.width - 0.5;
+        CGFloat top = frame.origin.y + 0.5;
+        CGFloat bottom = frame.origin.y + frame.size.height - 0.5;
+        
+        [path moveToPoint:NSMakePoint(left, top + VMARGIN)];
+        [path lineToPoint:NSMakePoint(left, top)];
+        [path lineToPoint:NSMakePoint(right, top)];
+        [path lineToPoint:NSMakePoint(right, bottom)];
+        [path lineToPoint:NSMakePoint(left, bottom)];
+        [path lineToPoint:NSMakePoint(left, top + VMARGIN)];
+        
+        CGFloat dashPattern[2] = { 5, 5 };
+        [path setLineDash:dashPattern count:2 phase:0];
+        [color set];
+        [path stroke];
+    }
 }
 
 - (void)textViewPostTabContentsChangedNotification
@@ -4263,7 +4127,7 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     [[self tab] nextSession];
 }
 
-- (void)textViewSelectPreviousPane;
+- (void)textViewSelectPreviousPane
 {
     [[self tab] previousSession];
 }
@@ -4288,13 +4152,13 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     return [[self class] pasteboardString];
 }
 
-- (void)textViewPasteFromSessionWithMostRecentSelection
+- (void)textViewPasteFromSessionWithMostRecentSelection:(PTYSessionPasteFlags)flags
 {
     PTYSession *session = [[iTermController sharedInstance] sessionWithMostRecentSelection];
     if (session) {
         PTYTextView *textview = [session textview];
         if ([textview isAnyCharSelected]) {
-            [self pasteString:[textview selectedText]];
+            [self pasteString:[textview selectedText] flags:flags];
         }
     }
 }
@@ -4387,6 +4251,141 @@ static long long timeInTenthsOfSeconds(struct timeval t)
 - (void)textViewDidBecomeFirstResponder
 {
     [[self tab] setActiveSession:self];
+}
+
+- (BOOL)textViewReportMouseEvent:(NSEventType)eventType
+                       modifiers:(NSUInteger)modifiers
+                          button:(MouseButtonNumber)button
+                      coordinate:(VT100GridCoord)coord
+                          deltaY:(CGFloat)deltaY {
+    DLog(@"Report event type %lu, modifiers=%lu, button=%d, coord=%@",
+         (unsigned long)eventType, (unsigned long)modifiers, button,
+         VT100GridCoordDescription(coord));
+    
+    switch (eventType) {
+        case NSLeftMouseDown:
+        case NSRightMouseDown:
+        case NSOtherMouseDown:
+            switch ([_terminal mouseMode]) {
+                case MOUSE_REPORTING_NORMAL:
+                case MOUSE_REPORTING_BUTTON_MOTION:
+                case MOUSE_REPORTING_ALL_MOTION:
+                    _reportingMouseDown = YES;
+                    _lastReportedCoord = coord;
+                    [self writeTask:[_terminal.output mousePress:button
+                                                   withModifiers:modifiers
+                                                              at:coord]];
+                    return YES;
+                    
+                case MOUSE_REPORTING_NONE:
+                case MOUSE_REPORTING_HILITE:
+                    break;
+            }
+            break;
+            
+        case NSLeftMouseUp:
+        case NSRightMouseUp:
+        case NSOtherMouseUp:
+            if (_reportingMouseDown) {
+                _reportingMouseDown = NO;
+                _lastReportedCoord = VT100GridCoordMake(-1, -1);
+                
+                switch ([_terminal mouseMode]) {
+                    case MOUSE_REPORTING_NORMAL:
+                    case MOUSE_REPORTING_BUTTON_MOTION:
+                    case MOUSE_REPORTING_ALL_MOTION:
+                        _lastReportedCoord = coord;
+                        [self writeTask:[_terminal.output mouseRelease:button
+                                                         withModifiers:modifiers
+                                                                    at:coord]];
+                        return YES;
+                        
+                    case MOUSE_REPORTING_NONE:
+                    case MOUSE_REPORTING_HILITE:
+                        break;
+                }
+            }
+            break;
+            
+            
+        case NSMouseMoved:
+            if ([_terminal mouseMode] == MOUSE_REPORTING_ALL_MOTION &&
+                !VT100GridCoordEquals(coord, _lastReportedCoord)) {
+                _lastReportedCoord = coord;
+                [self writeTask:[_terminal.output mouseMotion:MOUSE_BUTTON_NONE
+                                                withModifiers:modifiers
+                                                           at:coord]];
+                return YES;
+            }
+            break;
+            
+        case NSLeftMouseDragged:
+        case NSRightMouseDragged:
+        case NSOtherMouseDragged:
+            if (_reportingMouseDown &&
+                !VT100GridCoordEquals(coord, _lastReportedCoord)) {
+                _lastReportedCoord = coord;
+                
+                switch ([_terminal mouseMode]) {
+                    case MOUSE_REPORTING_BUTTON_MOTION:
+                    case MOUSE_REPORTING_ALL_MOTION:
+                        [self writeTask:[_terminal.output mouseMotion:button
+                                                        withModifiers:modifiers
+                                                                   at:coord]];
+                        // Fall through
+                    case MOUSE_REPORTING_NORMAL:
+                        // Don't do selection when mouse reporting during a drag, even if the drag
+                        // is not reported (the clicks are).
+                        return YES;
+                        
+                    case MOUSE_REPORTING_NONE:
+                    case MOUSE_REPORTING_HILITE:
+                        break;
+                }
+            }
+            break;
+            
+        case NSScrollWheel:
+            switch ([_terminal mouseMode]) {
+                case MOUSE_REPORTING_NORMAL:
+                case MOUSE_REPORTING_BUTTON_MOTION:
+                case MOUSE_REPORTING_ALL_MOTION:
+                    if (deltaY != 0) {
+                        [self writeTask:[_terminal.output mousePress:button
+                                                       withModifiers:modifiers
+                                                                  at:coord]];
+                        return YES;
+                    }
+                    break;
+
+                case MOUSE_REPORTING_NONE:
+                    if ([[PreferencePanel sharedInstance] alternateMouseScroll] &&
+                        [_screen showingAlternateScreen]) {
+                        NSData *arrowKeyData = nil;
+                        if (deltaY > 0) {
+                            arrowKeyData = [_terminal.output keyArrowUp:modifiers];
+                        } else if (deltaY < 0) {
+                            arrowKeyData = [_terminal.output keyArrowDown:modifiers];
+                        }
+                        if (arrowKeyData) {
+                            for (int i = 0; i < ceil(fabs(deltaY)); i++) {
+                                [self writeTask:arrowKeyData];
+                            }
+                        }
+                        return YES;
+                    }
+                    break;
+
+                case MOUSE_REPORTING_HILITE:
+                    break;
+            }
+            break;
+                
+        default:
+            assert(NO);
+            break;
+    }
+    return NO;
 }
 
 - (void)sendEscapeSequence:(NSString *)text
@@ -4886,10 +4885,6 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     [[_tab realParentWindow] incrementBadge];
 }
 
-- (void)screenRequestUserAttention:(BOOL)isCritical {
-  [NSApp requestUserAttention:isCritical ? NSCriticalRequest : NSInformationalRequest];
-}
-
 - (NSString *)screenCurrentWorkingDirectory {
     return [_shell getWorkingDirectory];
 }
@@ -4937,10 +4932,11 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     self.currentMarkOrNotePosition = _lastMark.entry.interval;
     if (self.alertOnNextMark) {
         if (NSRunAlertPanel(@"Alert",
-                            [NSString stringWithFormat:@"Mark set in session “%@.”", [self name]],
+                            @"Mark set in session “%@.”",
                             @"Reveal",
                             @"OK",
-                            nil) == NSAlertDefaultReturn) {
+                            nil,
+                            [self name]) == NSAlertDefaultReturn) {
             [self reveal];
         }
         self.alertOnNextMark = NO;
@@ -5049,6 +5045,7 @@ static long long timeInTenthsOfSeconds(struct timeval t)
 - (void)screenFileReceiptEndedUnexpectedly {
     [self.download stop];
     [self.download endOfData];
+    self.download = nil;
 }
 
 - (void)setAlertOnNextMark:(BOOL)alertOnNextMark {
@@ -5056,9 +5053,10 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     [_textview setNeedsDisplay:YES];
 }
 
-- (void)screenRequestAttention:(BOOL)request {
+- (void)screenRequestAttention:(BOOL)request isCritical:(BOOL)isCritical {
     if (request) {
-        _requestAttentionId = [NSApp requestUserAttention:NSCriticalRequest];
+        _requestAttentionId =
+            [NSApp requestUserAttention:isCritical ? NSCriticalRequest : NSInformationalRequest];
     } else {
         [NSApp cancelUserAttentionRequest:_requestAttentionId];
     }
@@ -5141,6 +5139,7 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     }
     iTermTextExtractor *extractor = [iTermTextExtractor textExtractorWithDataSource:_screen];
     NSString *command = [extractor contentInRange:VT100GridWindowedRangeMake(range, 0, 0)
+                                       nullPolicy:kiTermTextExtractorNullPolicyFromStartToFirst
                                               pad:NO
                                includeLastNewline:NO
                            trimTrailingWhitespace:NO
@@ -5370,6 +5369,84 @@ static long long timeInTenthsOfSeconds(struct timeval t)
 - (void)handleTerminateScriptCommand:(NSScriptCommand *)command
 {
     [[self tab] closeSession:self];
+}
+
+- (NSColor *)backgroundColor {
+    return [_colorMap colorForKey:kColorMapBackground];
+}
+
+- (void)setBackgroundColor:(NSColor *)color {
+    [_colorMap setColor:color forKey:kColorMapBackground];
+}
+
+- (NSColor *)boldColor {
+    return [_colorMap colorForKey:kColorMapBold];
+}
+
+- (void)setBoldColor:(NSColor *)color {
+    [_colorMap setColor:color forKey:kColorMapBold];
+}
+
+- (NSColor *)cursorColor {
+    return [_colorMap colorForKey:kColorMapCursor];
+}
+
+- (void)setCursorColor:(NSColor *)color {
+    [_colorMap setColor:color forKey:kColorMapCursor];
+}
+
+- (NSColor *)cursorTextColor {
+    return [_colorMap colorForKey:kColorMapCursorText];
+}
+
+- (void)setCursorTextColor:(NSColor *)color {
+    [_colorMap setColor:color forKey:kColorMapCursorText];
+}
+
+- (NSColor *)foregroundColor {
+    return [_colorMap colorForKey:kColorMapForeground];
+}
+
+- (void)setForegroundColor:(NSColor *)color {
+    [_colorMap setColor:color forKey:kColorMapForeground];
+}
+
+- (NSColor *)selectedTextColor {
+    return [_colorMap colorForKey:kColorMapSelectedText];
+}
+
+- (void)setSelectedTextColor:(NSColor *)color {
+    [_colorMap setColor:color forKey:kColorMapSelectedText];
+}
+
+- (NSColor *)selectionColor {
+    return [_colorMap colorForKey:kColorMapSelection];
+}
+
+- (void)setSelectionColor:(NSColor *)color {
+    [_colorMap setColor:color forKey:kColorMapSelection];
+}
+
+#pragma mark - iTermPasteHelperDelegate
+
+- (void)pasteHelperWriteData:(NSData *)data {
+    [self writeTask:data];
+}
+
+- (void)pasteHelperKeyDown:(NSEvent *)event {
+    [_textview keyDown:event];
+}
+
+- (BOOL)pasteHelperShouldBracket {
+    return [_terminal bracketedPasteMode];
+}
+
+- (NSStringEncoding)pasteHelperEncoding {
+    return [_terminal encoding];
+}
+
+- (NSView *)pasteHelperViewForIndicator {
+    return _view;
 }
 
 @end

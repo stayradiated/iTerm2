@@ -88,7 +88,14 @@ int DebugLogImpl(const char *file, int line, const char *function, NSString* val
         gettimeofday(&tv, NULL);
 
         [gDebugLogLock lock];
-        [gDebugLogStr appendFormat:@"%lld.%08lld %s:%d (%s): ", (long long)tv.tv_sec, (long long)tv.tv_usec, file, line, function];
+        const char *lastSlash = strrchr(file, '/');
+        if (!lastSlash) {
+            lastSlash = file;
+        } else {
+            lastSlash++;
+        }
+        [gDebugLogStr appendFormat:@"%lld.%08lld %s:%d (%s): ",
+            (long long)tv.tv_sec, (long long)tv.tv_usec, lastSlash, line, function];
         [gDebugLogStr appendString:value];
         [gDebugLogStr appendString:@"\n"];
         if ([gDebugLogStr length] > 100000000) {
@@ -100,7 +107,7 @@ int DebugLogImpl(const char *file, int line, const char *function, NSString* val
     return 1;
 }
 
-void ToggleDebugLogging() {
+void ToggleDebugLogging(void) {
     if (!gDebugLogging) {
         NSRunAlertPanel(@"Debug Logging Enabled",
                         @"Writing to /tmp/debuglog.txt",

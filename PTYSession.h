@@ -6,7 +6,6 @@
 #import "LineBuffer.h"
 #import "PTYTask.h"
 #import "PTYTextView.h"
-#import "PasteViewController.h"
 #import "Popup.h"
 #import "ProfileModel.h"
 #import "TextViewWrapper.h"
@@ -55,7 +54,6 @@ typedef enum {
 @class SessionView;
 @interface PTYSession : NSResponder <
     FindViewControllerDelegate,
-    PasteViewControllerDelegate,
     PopupDelegate,
     PTYTaskDelegate,
     PTYTextViewDelegate,
@@ -76,7 +74,7 @@ typedef enum {
 @property(nonatomic, readonly) BOOL isTmuxClient;
 @property(nonatomic, readonly) BOOL isTmuxGateway;
 
-// Does the session have new output? Used by -[PTYTab setLabelAttributes] to color the tab's title
+// Does the session have new output? Used by -[PTYTab updateLabelAttributes] to color the tab's title
 // appropriately.
 @property(nonatomic, assign) BOOL newOutput;
 
@@ -91,12 +89,12 @@ typedef enum {
 
 @property(nonatomic, readonly) struct timeval lastOutput;
 
-// Is the session idle? Used by setLableAttribute to send a growl message when processing ends.
-@property(nonatomic, assign) BOOL growlIdle;
+// Is the session idle? Used by updateLabelAttributes to send a growl message when processing ends.
+@property(nonatomic, assign) BOOL havePostedIdleNotification;
 
 // Is there new output for the purposes of growl notifications? They run on a different schedule
 // than tab colors.
-@property(nonatomic, assign) BOOL growlNewOutput;
+@property(nonatomic, assign) BOOL havePostedNewOutputNotification;
 
 // Session name; can be changed via escape code. The getter will add formatting to it; to retrieve
 // the value that was set, use -rawName.
@@ -186,6 +184,7 @@ typedef enum {
 
 // Filename of background image.
 @property(nonatomic, copy) NSString *backgroundImagePath;
+@property(nonatomic, retain) NSImage *backgroundImage;
 
 @property(nonatomic, retain) iTermColorMap *colorMap;
 @property(nonatomic, assign) float transparency;
@@ -235,6 +234,18 @@ typedef enum {
 // FinalTerm
 @property(nonatomic, readonly) NSArray *autocompleteSuggestionsForCurrentCommand;
 @property(nonatomic, readonly) NSString *currentCommand;
+
+// Key-value coding compliance for Applescript. It's generally better to go through the |colorMap|.
+@property(nonatomic, retain) NSColor *backgroundColor;
+@property(nonatomic, retain) NSColor *boldColor;
+@property(nonatomic, retain) NSColor *cursorColor;
+@property(nonatomic, retain) NSColor *cursorTextColor;
+@property(nonatomic, retain) NSColor *foregroundColor;
+@property(nonatomic, retain) NSColor *selectedTextColor;
+@property(nonatomic, retain) NSColor *selectionColor;
+
+// Session is not in foreground and notifications are enabled on the screen.
+@property(nonatomic, readonly) BOOL shouldPostGrowlNotification;
 
 #pragma mark - methods
 
@@ -314,11 +325,9 @@ typedef enum {
 - (void)pageUp:(id)sender;
 - (void)pageDown:(id)sender;
 - (void)paste:(id)sender;
-- (void)pasteString:(NSString *)str flags:(int)flags;
+- (void)pasteString:(NSString *)str flags:(PTYSessionPasteFlags)flags;
 - (void)deleteBackward:(id)sender;
 - (void)deleteForward:(id)sender;
-- (void)textViewDidChangeSelection: (NSNotification *)aNotification;
-- (void)textViewResized: (NSNotification *)aNotification;
 - (void)setSplitSelectionMode:(SplitSelectionMode)mode;
 - (void)setSmartCursorColor:(BOOL)value;
 - (void)setMinimumContrast:(float)value;
@@ -392,8 +401,6 @@ typedef enum {
 - (void)searchNext;
 - (void)searchPrevious;
 
-// Bitmap of how the session looks.
-- (NSImage *)imageOfSession:(BOOL)flip;
 - (void)setPasteboard:(NSString *)pbName;
 - (void)stopCoprocess;
 - (void)launchSilentCoprocessWithCommand:(NSString *)command;
@@ -418,15 +425,18 @@ typedef enum {
 // Select this session and tab and bring window to foreground.
 - (void)reveal;
 
+// Refreshes the textview and takes a snapshot of the SessionView.
+- (NSImage *)snapshot;
+
 #pragma mark - Scripting Support
 
 // Object specifier
 - (NSScriptObjectSpecifier *)objectSpecifier;
--(void)handleExecScriptCommand: (NSScriptCommand *)aCommand;
--(void)handleTerminateScriptCommand: (NSScriptCommand *)command;
--(void)handleSelectScriptCommand: (NSScriptCommand *)command;
--(void)handleWriteScriptCommand: (NSScriptCommand *)command;
--(void)handleClearScriptCommand: (NSScriptCommand *)command;
+- (void)handleExecScriptCommand:(NSScriptCommand *)aCommand;
+- (void)handleTerminateScriptCommand:(NSScriptCommand *)command;
+- (void)handleSelectScriptCommand:(NSScriptCommand *)command;
+- (void)handleWriteScriptCommand:(NSScriptCommand *)command;
+- (void)handleClearScriptCommand:(NSScriptCommand *)command;
 
 @end
 

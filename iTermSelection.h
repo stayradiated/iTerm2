@@ -77,7 +77,7 @@ typedef enum {
 @property(nonatomic, readonly) BOOL liveRangeIsFlipped;
 
 // The range of selections. May be flipped.
-@property(nonatomic, assign) VT100GridWindowedRange liveRange;
+@property(nonatomic, readonly) VT100GridWindowedRange liveRange;
 
 // A selection is in progress.
 @property(nonatomic, readonly) BOOL live;
@@ -156,6 +156,7 @@ typedef enum {
 - (void)setLastRange:(VT100GridWindowedRange)lastRange mode:(iTermSelectionMode)mode;
 
 // Convert windowed selections to multiple discontinuous non-windowed selections.
-- (void)removeWindows;
+// If a subselection's window spans 0 to width, then it is windowless.
+- (void)removeWindowsWithWidth:(int)width;
 
 @end

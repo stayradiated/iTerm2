@@ -180,47 +180,6 @@ static const int ambiguous_chars[] = {
     return NO;
 }
 
-//
-// Replace Substring
-//
-- (NSMutableString *) stringReplaceSubstringFrom:(NSString *)oldSubstring to:(NSString *)newSubstring
-{
-    unsigned int     len;
-    NSMutableString *mstr;
-    NSRange          searchRange;
-    NSRange          resultRange;
-
-#define ADDON_SPACE 10
-
-    searchRange.location = 0;
-    searchRange.length = len = [self length];
-    mstr = [NSMutableString stringWithCapacity:(len + ADDON_SPACE)];
-    NSParameterAssert(mstr != nil);
-
-    for (;;)
-    {
-        resultRange = [self rangeOfString:oldSubstring options:NSLiteralSearch range:searchRange];
-        if (resultRange.length == 0)
-            break;  // Not found!
-
-        // append and replace
-        [mstr appendString:[self substringWithRange:
-            NSMakeRange(searchRange.location, resultRange.location - searchRange.location)] ];
-        [mstr appendString:newSubstring];
-
-        // update search Range
-        searchRange.location = resultRange.location + resultRange.length;
-        searchRange.length   = len - searchRange.location;
-
-        //  NSLog(@"resultRange.location=%d\n", resultRange.location);
-        //  NSLog(@"resultRange.length=%d\n", resultRange.length);
-    }
-
-    [mstr appendString:[self substringWithRange:searchRange]];
-
-    return mstr;
-}
-
 - (NSString *)stringWithEscapedShellCharacters
 {
     NSMutableString *aMutableString = [[[NSMutableString alloc] initWithString: self] autorelease];
@@ -237,6 +196,14 @@ static const int ambiguous_chars[] = {
     return [NSString stringWithString:aMutableString];
 }
 
+- (NSString *)stringWithShellEscapedTabs
+{
+    const int kLNEXT = 22;
+    NSString *replacement = [NSString stringWithFormat:@"%c\t", kLNEXT];
+
+    return [self stringByReplacingOccurrencesOfString:@"\t" withString:replacement];
+}
+
 - (NSString*)stringWithPercentEscape
 {
     // From
@@ -250,7 +217,8 @@ static const int ambiguous_chars[] = {
 
 - (NSString*)stringWithLinefeedNewlines
 {
-    return [[self stringReplaceSubstringFrom:@"\r\n" to:@"\r"] stringReplaceSubstringFrom:@"\n" to:@"\r"];
+    return [[self stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\r"]
+               stringByReplacingOccurrencesOfString:@"\n" withString:@"\r"];
 }
 
 - (void)breakDownCommandToPath:(NSString **)cmd cmdArgs:(NSArray **)path
@@ -825,6 +793,67 @@ int decode_utf8_char(const unsigned char *datap,
                                                              NULL,
                                                              kCFStringEncodingUTF8);
     return [theString autorelease];
+}
+
+- (NSString *)stringByCapitalizingFirstLetter {
+    if ([self length] == 0) {
+        return self;
+    }
+    NSString *prefix = [self substringToIndex:1];
+    NSString *suffix = [self substringFromIndex:1];
+    return [[prefix uppercaseString] stringByAppendingString:suffix];
+}
+
+- (NSString *)hexOrDecimalConversionHelp {
+    unsigned long long value;
+    BOOL decToHex;
+    if ([self hasPrefix:@"0x"] && [self length] <= 18) {
+        decToHex = NO;
+        NSScanner *scanner = [NSScanner scannerWithString:self];
+        
+        [scanner setScanLocation:2]; // bypass 0x
+        if (![scanner scanHexLongLong:&value]) {
+            return nil;
+        }
+    } else {
+        decToHex = YES;
+        value = [self longLongValue];
+    }
+    if (!value) {
+        return nil;
+    }
+    
+    BOOL is32bit;
+    if (decToHex) {
+        is32bit = ((long long)value >= -2147483648LL && (long long)value <= 2147483647LL);
+    } else {
+        is32bit = [self length] <= 10;
+    }
+    
+    if (is32bit) {
+        // Value fits in a signed 32-bit value, so treat it as such
+        int intValue = (int)value;
+        if (decToHex) {
+            return [NSString stringWithFormat:@"%d = 0x%x", intValue, intValue];
+        } else if (intValue >= 0) {
+            return [NSString stringWithFormat:@"0x%x = %d", intValue, intValue];
+        } else {
+            return [NSString stringWithFormat:@"0x%x = %d or %u", intValue, intValue, intValue];
+        }
+    } else {
+        // 64-bit value
+        if (decToHex) {
+            return [NSString stringWithFormat:@"%lld = 0x%llx", value, value];
+        } else if ((long long)value >= 0) {
+            return [NSString stringWithFormat:@"0x%llx = %lld", value, value];
+        } else {
+            return [NSString stringWithFormat:@"0x%llx = %lld or %llu", value, value, value];
+        }
+    }
+}
+
+- (BOOL)stringIsUrlLike {
+    return [self hasPrefix:@"http://"] || [self hasPrefix:@"https://"];
 }
 
 @end

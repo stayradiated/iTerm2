@@ -11,7 +11,7 @@
 
 static const CGFloat kTitleHeight = 17;
 static const CGFloat kMargin = 4;
-static const CGFloat kLeftMargin = 14;
+static const CGFloat kLeftMargin = 4;
 static const CGFloat kRightMargin = 4;
 static const CGFloat kBottomMargin = 8;
 static const CGFloat kButtonSize = 17;
@@ -26,18 +26,20 @@ static const CGFloat kButtonSize = 17;
 {
     self = [super initWithFrame:frame];
     if (self) {
-        title_ = [[NSTextField alloc] initWithFrame:NSMakeRect(kButtonSize, 0, frame.size.width - kButtonSize - kRightMargin, kTitleHeight)];
+        title_ = [[NSTextField alloc] initWithFrame:NSMakeRect(kButtonSize,
+                                                               0,
+                                                               frame.size.width - kButtonSize - kRightMargin,
+                                                               kTitleHeight)];
         [title_ setEditable:NO];
         [title_ bind:@"value" toObject:self withKeyPath:@"name" options:nil];
+        title_.backgroundColor = [NSColor clearColor];
         [title_ setAutoresizingMask:NSViewWidthSizable | NSViewMaxYMargin];
         [title_ setAlignment:NSCenterTextAlignment];
-        [title_ setBackgroundColor:[NSColor windowBackgroundColor]];
         [title_ setBezeled:NO];
         [self addSubview:title_];
         [title_ release];
 
-        NSImage *closeImage = [[[NSImage alloc] initWithContentsOfFile:[[NSBundle mainBundle] pathForResource:@"closebutton"
-                                                                                                       ofType:@"tif"]] autorelease];
+        NSImage *closeImage = [NSImage imageNamed:@"closebutton"];
         closeButton_ = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, kButtonSize, kButtonSize)];
         [closeButton_ setButtonType:NSMomentaryPushInButton];
         [closeButton_ setImage:closeImage];
@@ -63,6 +65,10 @@ static const CGFloat kButtonSize = 17;
     [name release];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [super dealloc];
+}
+
+- (NSString *)description {
+    return [NSString stringWithFormat:@"<%@: %p frame=%@>", [self class], self, [NSValue valueWithRect:self.frame]];
 }
 
 - (void)relayout
@@ -116,6 +122,9 @@ static const CGFloat kButtonSize = 17;
 
 - (NSObject<ToolbeltTool> *)tool
 {
+    if ([[container_ subviews] count] == 0) {
+        return nil;
+    }
     return (NSObject<ToolbeltTool>*) [[container_ subviews] objectAtIndex:0];
 }
 

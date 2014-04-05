@@ -57,6 +57,8 @@
     int saveBgGreen_;
     int saveBgBlue_;
     ColorMode saveBgColorMode_;
+    BOOL saveOriginMode_;
+    BOOL saveWraparoundMode_;
     
     int sendModifiers_[NUM_MODIFIABLE_RESOURCES];
 }
@@ -142,16 +144,13 @@ static const int kMaxScreenRows = 4096;
         fgColorMode_ = ColorModeAlternate;
         bgColorCode_ = ALTSEM_DEFAULT;
         bgColorMode_ = ColorModeAlternate;
-        saveForeground_ = fgColorCode_;
-        saveFgColorMode_ = fgColorMode_;
-        saveBackground_ = bgColorCode_;
-        saveBgColorMode_ = bgColorMode_;
         _mouseMode = MOUSE_REPORTING_NONE;
         _mouseFormat = MOUSE_FORMAT_XTERM;
 
         _allowKeypadMode = YES;
 
         numLock_ = YES;
+        [self saveTextAttributes];  // initialize save area
     }
     return self;
 }
@@ -163,6 +162,10 @@ static const int kMaxScreenRows = 4096;
     [_termType release];
 
     [super dealloc];
+}
+
+- (void)stopReceivingFile {
+    receivingFile_ = NO;
 }
 
 - (void)setEncoding:(NSStringEncoding)encoding {
@@ -206,6 +209,8 @@ static const int kMaxScreenRows = 4096;
     saveBgGreen_ = bgGreen_;
     saveBgBlue_ = bgBlue_;
     saveBgColorMode_ = bgColorMode_;
+    saveOriginMode_ = self.originMode;
+    saveWraparoundMode_ = self.wraparoundMode;
 }
 
 - (void)restoreTextAttributes
@@ -224,6 +229,8 @@ static const int kMaxScreenRows = 4096;
     bgGreen_ = saveBgGreen_;
     bgBlue_ = saveBgBlue_;
     bgColorMode_ = saveBgColorMode_;
+    self.originMode = saveOriginMode_;
+    self.wraparoundMode = saveWraparoundMode_;
 }
 
 - (void)setForegroundColor:(int)fgColorCode alternateSemantics:(BOOL)altsem
@@ -258,10 +265,9 @@ static const int kMaxScreenRows = 4096;
     self.keypadMode = NO;
     self.insertMode = NO;
     self.bracketedPasteMode = NO;
-    saveCharset_ = _charset = 0;
+    _charset = 0;
     xon_ = YES;
     bold_ = italic_ = blink_ = reversed_ = under_ = NO;
-    saveBold_ = saveItalic_ = saveBlink_ = saveReversed_ = saveUnder_ = NO;
     fgColorCode_ = ALTSEM_DEFAULT;
     fgGreen_ = 0;
     fgBlue_ = 0;
@@ -272,6 +278,7 @@ static const int kMaxScreenRows = 4096;
     bgColorMode_ = ColorModeAlternate;
     self.mouseMode = MOUSE_REPORTING_NONE;
     self.mouseFormat = MOUSE_FORMAT_XTERM;
+    [self saveTextAttributes];  // reset saved text attributes
     [delegate_ terminalMouseModeDidChangeTo:_mouseMode];
     [delegate_ terminalSetUseColumnScrollRegion:NO];
     _reportFocus = NO;
@@ -558,14 +565,6 @@ static const int kMaxScreenRows = 4096;
         case VT100CC_DC3:
             xon_ = NO;
             break;
-        case VT100CSI_DECRC:
-            [self restoreTextAttributes];
-            [delegate_ terminalRestoreCursor];
-            break;
-        case VT100CSI_DECSC:
-            [self saveTextAttributes];
-            [delegate_ terminalSaveCursor];
-            break;
         case VT100CSI_DECSTR:
             self.wraparoundMode = YES;
             self.originMode = NO;
@@ -585,8 +584,8 @@ static const int kMaxScreenRows = 4096;
 
         case VT100CSI_SET_MODIFIERS: {
             if (token.csi->count == 0) {
-                for (int i = 0; i < NUM_MODIFIABLE_RESOURCES; i++) {
-                    sendModifiers_[i] = 0;
+                for (int j = 0; j < NUM_MODIFIABLE_RESOURCES; j++) {
+                    sendModifiers_[j] = 0;
                 }
             } else {
                 int resource = token.csi->p[0];
@@ -981,9 +980,17 @@ static const int kMaxScreenRows = 4096;
             [delegate_ terminalDidReceiveBase64FileData:[token stringForAsciiData]];
             return;
         } else if (token->type == VT100CC_CR ||
-                   token->type == VT100CC_LF ||
-                   token->type == XTERMCC_SET_KVP) {
-            return;
+                   token->type == VT100CC_LF) {
+          return;
+        } else  if (token->type == XTERMCC_SET_KVP) {
+          NSArray *kvp = [self keyValuePairInToken:token];
+          if ([kvp[0] isEqualToString:@"EndFile"]) {
+            [self executeXtermSetKvp:token];
+          } else {
+            [delegate_ terminalFileReceiptEndedUnexpectedly];
+            receivingFile_ = NO;
+          }
+          return;
         } else {
             [delegate_ terminalFileReceiptEndedUnexpectedly];
             receivingFile_ = NO;
@@ -1110,6 +1117,7 @@ static const int kMaxScreenRows = 4096;
         case VT100CSI_DECRC:
             [self restoreTextAttributes];
             [delegate_ terminalRestoreCursor];
+            [delegate_ terminalRestoreCharsetFlags];
             break;
         case VT100CSI_DECREPTPARM:
         case VT100CSI_DECREQTPARM:
@@ -1117,6 +1125,7 @@ static const int kMaxScreenRows = 4096;
         case VT100CSI_DECSC:
             [self saveTextAttributes];
             [delegate_ terminalSaveCursor];
+            [delegate_ terminalSaveCharsetFlags];
             break;
         case VT100CSI_DECSTBM:
             [delegate_ terminalSetScrollRegionTop:token.csi->p[0] == 0 ? 0 : token.csi->p[0] - 1
@@ -1185,7 +1194,7 @@ static const int kMaxScreenRows = 4096;
             break;
 
         case ANSI_RIS:
-            [delegate_ terminalResetPreservingPrompt:NO];
+            [self resetPreservingPrompt:NO];
             break;
         case VT100CSI_RM:
             break;
@@ -1595,21 +1604,28 @@ static const int kMaxScreenRows = 4096;
     }
 }
 
+- (NSArray *)keyValuePairInToken:(VT100Token *)token {
+  // argument is of the form key=value
+  // key: Sequence of characters not = or ^G
+  // value: Sequence of characters not ^G
+  NSString* argument = token.string;
+  NSRange eqRange = [argument rangeOfString:@"="];
+  NSString* key;
+  NSString* value;
+  if (eqRange.location != NSNotFound) {
+    key = [argument substringToIndex:eqRange.location];;
+    value = [argument substringFromIndex:eqRange.location+1];
+  } else {
+    key = argument;
+    value = @"";
+  }
+  return @[ key, value ];
+}
+
 - (void)executeXtermSetKvp:(VT100Token *)token {
-    // argument is of the form key=value
-    // key: Sequence of characters not = or ^G
-    // value: Sequence of characters not ^G
-    NSString* argument = token.string;
-    NSRange eqRange = [argument rangeOfString:@"="];
-    NSString* key;
-    NSString* value;
-    if (eqRange.location != NSNotFound) {
-        key = [argument substringToIndex:eqRange.location];;
-        value = [argument substringFromIndex:eqRange.location+1];
-    } else {
-        key = argument;
-        value = @"";
-    }
+    NSArray *kvp = [self keyValuePairInToken:token];
+    NSString *key = kvp[0];
+    NSString *value = kvp[1];
     if ([key isEqualToString:@"CursorShape"]) {
         // Value must be an integer. Bogusly, non-numbers are treated as 0.
         int shape = [value intValue];
@@ -1629,9 +1645,11 @@ static const int kMaxScreenRows = 4096;
         [delegate_ terminalCurrentDirectoryDidChangeTo:value];
     } else if ([key isEqualToString:@"SetProfile"]) {
         [delegate_ terminalProfileShouldChangeTo:(NSString *)value];
-    } else if ([key isEqualToString:@"AddNote"]) {
+    } else if ([key isEqualToString:@"AddNote"] ||  // Deprecated
+               [key isEqualToString:@"AddAnnotation"]) {
         [delegate_ terminalAddNote:(NSString *)value show:YES];
-    } else if ([key isEqualToString:@"AddHiddenNote"]) {
+    } else if ([key isEqualToString:@"AddHiddenNote"] ||  // Deprecated
+               [key isEqualToString:@"AddHiddenAnnotation"]) {
         [delegate_ terminalAddNote:(NSString *)value show:NO];
     } else if ([key isEqualToString:@"HighlightCursorLine"]) {
         [delegate_ terminalSetHighlightCursorLine:value.length ? [value boolValue] : YES];
@@ -1674,14 +1692,18 @@ static const int kMaxScreenRows = 4096;
             widthUnits = kVT100TerminalUnitsAuto;
         } else if ([widthString hasSuffix:@"px"]) {
             widthUnits = kVT100TerminalUnitsPixels;
+        } else if ([widthString hasSuffix:@"%"]) {
+            widthUnits = kVT100TerminalUnitsPercentage;
         }
         int height = [heightString intValue];
         if ([heightString isEqualToString:@"auto"]) {
             heightUnits = kVT100TerminalUnitsAuto;
         } else if ([heightString hasSuffix:@"px"]) {
             heightUnits = kVT100TerminalUnitsPixels;
+        } else if ([heightString hasSuffix:@"%"]) {
+            heightUnits = kVT100TerminalUnitsPercentage;
         }
-        
+
         NSString *name = [dict[@"name"] stringByBase64DecodingStringWithEncoding:NSISOLatin1StringEncoding];
         if (!name) {
             name = @"Unnamed file";

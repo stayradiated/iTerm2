@@ -162,7 +162,9 @@
 - (void)screenFlashImage:(FlashImage)image;
 
 - (void)screenIncrementBadge;
-- (void)screenRequestUserAttention:(BOOL)isCritical;
+
+// Bounce the dock. Set request to false to cancel.
+- (void)screenRequestAttention:(BOOL)request isCritical:(BOOL)isCritical;
 - (NSString *)screenCurrentWorkingDirectory;
 
 // Show/hide the cursor.
@@ -195,7 +197,6 @@
 - (void)screenDidReceiveBase64FileData:(NSString *)data;
 - (void)screenFileReceiptEndedUnexpectedly;
 
-- (void)screenRequestAttention:(BOOL)request;
 - (iTermColorMap *)screenColorMap;
 - (void)screenSetCurrentTabColor:(NSColor *)color;
 - (void)screenSetTabColorRedComponentTo:(CGFloat)color;

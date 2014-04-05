@@ -323,7 +323,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     if (selection.live) {
         [selection endLiveSelection];
     }
-    [selection removeWindows];
+    [selection removeWindowsWithWidth:self.width];
     BOOL couldHaveSelection = [delegate_ screenHasView] && selection.hasSelection;
 
     int usedHeight = [currentGrid_ numberOfLinesUsed];
@@ -331,9 +331,9 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     VT100Grid *copyOfAltGrid = [[altGrid_ copy] autorelease];
     LineBuffer *realLineBuffer = linebuffer_;
 
-    // This is an array of triplets:
-    // [LineBufferPosition start, LineBufferPosition end, iTermSubSelection]
-    NSMutableArray *altScreenSubSelectionTriplets = nil;
+    // This is an array of tuples:
+    // [LineBufferPositionRange, iTermSubSelection]
+    NSMutableArray *altScreenSubSelectionTuples = nil;
     LineBufferPosition *originalLastPos = [linebuffer_ lastPosition];
     BOOL wasShowingAltScreen = (currentGrid_ == altGrid_);
 
@@ -347,21 +347,17 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
               toScrollback:lineBufferWithAltScreen
             withUsedHeight:usedHeight
                  newHeight:new_height];
-        altScreenSubSelectionTriplets = [NSMutableArray array];
+        altScreenSubSelectionTuples = [NSMutableArray array];
         for (iTermSubSelection *sub in selection.allSubSelections) {
             VT100GridCoordRange range = sub.range.coordRange;
-
-            BOOL startOk, endOk;
-            LineBufferPosition *start;
-            LineBufferPosition *end;
-            [self getNullCorrectedSelectionStartPosition:&start
-                                             endPosition:&end
-                           selectionStartPositionIsValid:&startOk
-                              selectionEndPostionIsValid:&endOk
-                                            inLineBuffer:lineBufferWithAltScreen
-                                                forRange:range];
-            if (startOk && endOk) {
-                [altScreenSubSelectionTriplets addObject:@[start, end, sub]];
+            LineBufferPositionRange *positionRange =
+                [self positionRangeForCoordRange:range
+                                    inLineBuffer:lineBufferWithAltScreen];
+            if (positionRange) {
+                [altScreenSubSelectionTuples addObject:@[ positionRange, sub ]];
+            } else {
+                DLog(@"Failed to get position range for selection on alt screen %@",
+                     VT100GridCoordRangeDescription(range));
             }
         }
     }
@@ -405,22 +401,18 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
             VT100GridCoordRange range = [self coordRangeForInterval:note.entry.interval];
             [[note retain] autorelease];
             [intervalTree_ removeObject:note];
-            
-            BOOL ok1, ok2;
-            LineBufferPosition *startPosition = nil;
-            LineBufferPosition *endPosition = nil;
-            
-            [self getNullCorrectedSelectionStartPosition:&startPosition
-                                             endPosition:&endPosition
-                           selectionStartPositionIsValid:&ok1
-                              selectionEndPostionIsValid:&ok2
-                                            inLineBuffer:appendOnlyLineBuffer
-                                                forRange:range];
-            DLog(@"Add note on alt screen at %@ (position %@ to %@) to altScreenNotes",
-                  VT100GridCoordRangeDescription(range),
-                  startPosition,
-                  endPosition);
-            [altScreenNotes addObject:@[ note, startPosition, endPosition ]];
+            LineBufferPositionRange *positionRange =
+                [self positionRangeForCoordRange:range inLineBuffer:appendOnlyLineBuffer];
+            if (positionRange) {
+                DLog(@"Add note on alt screen at %@ (position %@ to %@) to altScreenNotes",
+                     VT100GridCoordRangeDescription(range),
+                     positionRange.start,
+                     positionRange.end);
+                [altScreenNotes addObject:@[ note, positionRange.start, positionRange.end ]];
+            } else {
+                DLog(@"Failed to get position range while in alt screen for note %@ with range %@",
+                     note, VT100GridCoordRangeDescription(range));
+            }
         }
     }
     
@@ -444,6 +436,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     if (!wasShowingAltScreen && couldHaveSelection) {
         for (iTermSubSelection *sub in selection.allSubSelections) {
             VT100GridCoordRange newSelection;
+            DLog(@"convert sub %@", sub);
             BOOL ok = [self convertRange:sub.range.coordRange
                                  toWidth:new_width
                                       to:&newSelection
@@ -559,16 +552,14 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
             withUsedHeight:usedHeight
                  newHeight:new_height];
 
-        for (int i = 0; i < altScreenSubSelectionTriplets.count; i++) {
-            LineBufferPosition *originalStartPos = altScreenSubSelectionTriplets[i][0];
-            LineBufferPosition *originalEndPos = altScreenSubSelectionTriplets[i][1];
-            iTermSubSelection *originalSub = altScreenSubSelectionTriplets[i][2];
-            iTermSelectionMode mode = originalSub.selectionMode;
+        for (int i = 0; i < altScreenSubSelectionTuples.count; i++) {
+            LineBufferPositionRange *positionRange = altScreenSubSelectionTuples[i][0];
+            iTermSubSelection *originalSub = altScreenSubSelectionTuples[i][2];
             VT100GridCoordRange newSelection;
             BOOL ok = [self computeRangeFromOriginalLimit:originalLastPos
                                             limitPosition:newLastPos
-                                            startPosition:originalStartPos
-                                              endPosition:originalEndPos
+                                            startPosition:positionRange.start
+                                              endPosition:positionRange.end
                                                  newWidth:new_width
                                                lineBuffer:appendOnlyLineBuffer
                                                     range:&newSelection
@@ -577,7 +568,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
                 VT100GridWindowedRange theRange =
                     VT100GridWindowedRangeMake(newSelection, 0, 0);
                 iTermSubSelection *theSub = [iTermSubSelection subSelectionWithRange:theRange
-                                                                                mode:mode];
+                                                                                mode:originalSub.selectionMode];
                 theSub.connected = originalSub.connected;
                 [newSubSelections addObject:theSub];
             }
@@ -984,7 +975,6 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
         [delegate_ screenFlashImage:FlashBell];
     }
     [delegate_ screenIncrementBadge];
-    [delegate_ screenRequestUserAttention:NO];
 }
 
 - (void)setHistory:(NSArray *)history
@@ -2136,6 +2126,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     int x1, yStart, x2, y2;
 
     if (before && after) {
+        [delegate_ screenRemoveSelection];
         [self scrollScreenIntoHistory];
         x1 = 0;
         yStart = 0;
@@ -2154,6 +2145,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
         if (x1 == 0 && yStart == 0) {
             // Save the whole screen. This helps the "screen" terminal, where CSI H CSI J is used to
             // clear the screen.
+            [delegate_ screenRemoveSelection];
             [self scrollScreenIntoHistory];
         }
     } else {
@@ -2515,6 +2507,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
 }
 
 - (void)terminalScrollUp:(int)n {
+    [delegate_ screenRemoveSelection];
     for (int i = 0;
          i < MIN(currentGrid_.size.height, n);
          i++) {
@@ -2526,6 +2519,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
 }
 
 - (void)terminalScrollDown:(int)n {
+    [delegate_ screenRemoveSelection];
     [currentGrid_ scrollRect:[currentGrid_ scrollRegionRect]
                       downBy:MIN(currentGrid_.size.height, n)];
     [delegate_ screenTriggerableChangeDidOccur];
@@ -2660,8 +2654,8 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
                                 [self width],
                                 screenOrigin + self.height);
     DLog(@"  moveNotes: looking in range %@", VT100GridCoordRangeDescription(screenRange));
-    Interval *interval = [self intervalForGridCoordRange:screenRange];
-    for (id<IntervalTreeObject> obj in [source objectsInInterval:interval]) {
+    Interval *sourceInterval = [self intervalForGridCoordRange:screenRange];
+    for (id<IntervalTreeObject> obj in [source objectsInInterval:sourceInterval]) {
         Interval *interval = [[obj.entry.interval retain] autorelease];
         [[obj retain] autorelease];
         DLog(@"  found note with interval %@", interval);
@@ -2701,6 +2695,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     if (currentGrid_ == altGrid_) {
         return;
     }
+    [delegate_ screenRemoveSelection];
     if (!altGrid_) {
         altGrid_ = [[VT100Grid alloc] initWithSize:primaryGrid_.size delegate:self];
     }
@@ -2716,6 +2711,10 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     [currentGrid_ markAllCharsDirty:YES];
     [delegate_ screenNeedsRedraw];
     commandStartX_ = commandStartY_ = -1;
+}
+
+- (BOOL)showingAlternateScreen {
+    return currentGrid_ == altGrid_;
 }
 
 - (void)hideOnScreenNotesAndTruncateSpanners
@@ -2740,6 +2739,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
 - (void)terminalShowPrimaryBufferRestoringCursor:(BOOL)restore
 {
     if (currentGrid_ == altGrid_) {
+        [delegate_ screenRemoveSelection];
         [self hideOnScreenNotesAndTruncateSpanners];
         currentGrid_ = primaryGrid_;
         commandStartX_ = commandStartY_ = -1;
@@ -2788,6 +2788,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     // used to move the cursor's wrapped line to the top of the screen. It's only used from
     // DECSET 1049, and neither xterm nor terminal have this behavior, and I'm not sure why it
     // would be desirable anyway. Like xterm (and unlike Terminal) we leave the cursor put.
+    [delegate_ screenRemoveSelection];
     [currentGrid_ setCharsFrom:VT100GridCoordMake(0, 0)
                             to:VT100GridCoordMake(currentGrid_.size.width - 1,
                                                   currentGrid_.size.height - 1)
@@ -2929,6 +2930,10 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
             width = ceil((double)width / cellSize.width);
             break;
             
+        case kVT100TerminalUnitsPercentage:
+            width = [self width];
+            break;
+            
         case kVT100TerminalUnitsCells:
             break;
             
@@ -2943,6 +2948,10 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     switch (heightUnits) {
         case kVT100TerminalUnitsPixels:
             height = ceil((double)height / cellSize.height);
+            break;
+            
+        case kVT100TerminalUnitsPercentage:
+            height = [self height];
             break;
             
         case kVT100TerminalUnitsCells:
@@ -2985,17 +2994,19 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
 
     // Allocate cells for the image.
     // TODO: Support scroll regions.
-    int xOffset = self.cursorX;
+    int xOffset = self.cursorX - 1;
     int screenWidth = currentGrid_.size.width;
     screen_char_t c = ImageCharForNewImage(name, width, height, preserveAspectRatio);
     for (int y = 0; y < height; y++) {
+        if (y > 0) {
+            [self linefeed];
+        }
         for (int x = xOffset; x < xOffset + width && x < screenWidth; x++) {
             SetPositionInImageChar(&c, x - xOffset, y);
             [currentGrid_ setCharsFrom:VT100GridCoordMake(x, currentGrid_.cursorY)
                                     to:VT100GridCoordMake(x, currentGrid_.cursorY)
                                 toChar:c];
         }
-        [self linefeed];
     }
     currentGrid_.cursorX = currentGrid_.cursorX + width + 1;
     
@@ -3046,7 +3057,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
 }
 
 - (void)terminalRequestAttention:(BOOL)request {
-    [delegate_ screenRequestAttention:request];
+    [delegate_ screenRequestAttention:request isCritical:YES];
 }
 
 - (void)terminalSetForegroundColor:(NSColor *)color {
@@ -3113,7 +3124,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     [delegate_ screenSetHighlightCursorLine:highlight];
 }
 
-- (void)terminalPromptDidStart; {
+- (void)terminalPromptDidStart {
     // FinalTerm uses this to define the start of a collapsable region. That would be a nightmare
     // to add to iTerm, and our answer to this is marks, which already existed anyway.
     [delegate_ screenAddMarkOnLine:[self numberOfScrollbackLines] + self.cursorY - 1];
@@ -3369,10 +3380,12 @@ static void SwapInt(int *a, int *b) {
                       toStartX:(VT100GridCoord *)startPtr
                         toEndX:(VT100GridCoord *)endPtr
 {
-    assert(start.x >= 0);
-    assert(end.x >= 0);
-    assert(start.y >= 0);
-    assert(end.y >= 0);
+    if (start.x < 0 || end.x < 0 ||
+        start.y < 0 || end.y < 0) {
+        *startPtr = start;
+        *endPtr = end;
+        return;
+    }
 
     if (!XYIsBeforeXY(start.x, start.y, end.x, end.y)) {
         SwapInt(&start.x, &end.x);
@@ -3406,23 +3419,15 @@ static void SwapInt(int *a, int *b) {
     *endPtr = max;
 }
 
-- (BOOL)getNullCorrectedSelectionStartPosition:(LineBufferPosition **)startPos
-                                   endPosition:(LineBufferPosition **)endPos
-                 selectionStartPositionIsValid:(BOOL *)selectionStartPositionIsValid
-                    selectionEndPostionIsValid:(BOOL *)selectionEndPostionIsValid
-                                  inLineBuffer:(LineBuffer *)lineBuffer
-                                      forRange:(VT100GridCoordRange)range
-{
-    int actualStartX = range.start.x;
-    int actualStartY = range.start.y;
-    int actualEndX = range.end.x;
-    int actualEndY = range.end.y;
-
+- (LineBufferPositionRange *)positionRangeForCoordRange:(VT100GridCoordRange)range
+                                           inLineBuffer:(LineBuffer *)lineBuffer {
+    LineBufferPositionRange *positionRange = [[[LineBufferPositionRange alloc] init] autorelease];
+    
     BOOL endExtends = NO;
     // Use the predecessor of endx,endy so it will have a legal position in the line buffer.
-    if (actualEndX == [self width]) {
-        screen_char_t *line = [self getLineAtIndex:actualEndY];
-        if (line[actualEndX - 1].code == 0 && line[actualEndX].code == EOL_HARD) {
+    if (range.end.x == [self width]) {
+        screen_char_t *line = [self getLineAtIndex:range.end.y];
+        if (line[range.end.x - 1].code == 0 && line[range.end.x].code == EOL_HARD) {
             // The selection goes all the way to the end of the line and there is a null at the
             // end of the line, so it extends to the end of the line. The linebuffer can't recover
             // this from its position because the trailing null in the line wouldn't be in the
@@ -3430,40 +3435,43 @@ static void SwapInt(int *a, int *b) {
             endExtends = YES;
         }
     }
-    actualEndX--;
-    if (actualEndX < 0) {
-        actualEndY--;
-        actualEndX = [self width] - 1;
-        if (actualEndY < 0) {
-            return NO;
+    range.end.x--;
+    if (range.end.x < 0) {
+        range.end.y--;
+        range.end.x = [self width] - 1;
+        if (range.end.y < 0) {
+            return nil;
         }
+    }
+    
+    if (range.start.x < 0 || range.start.y < 0 ||
+        range.end.x < 0 || range.end.y < 0) {
+        return nil;
     }
 
     VT100GridCoord trimmedStart;
     VT100GridCoord trimmedEnd;
-    [self trimSelectionFromStart:VT100GridCoordMake(actualStartX, actualStartY)
-                             end:VT100GridCoordMake(actualEndX, actualEndY)
+    [self trimSelectionFromStart:VT100GridCoordMake(range.start.x, range.start.y)
+                             end:VT100GridCoordMake(range.end.x, range.end.y)
                         toStartX:&trimmedStart
                           toEndX:&trimmedEnd];
     if (VT100GridCoordOrder(trimmedStart, trimmedEnd) == NSOrderedDescending) {
-        return NO;
+        return nil;
     }
 
-    *startPos = [lineBuffer positionForCoordinate:trimmedStart
-                                            width:currentGrid_.size.width
-                                           offset:0];
-    if (selectionStartPositionIsValid) {
-        *selectionStartPositionIsValid = (*startPos != nil);
-    }
-    *endPos = [lineBuffer positionForCoordinate:trimmedEnd
-                                          width:currentGrid_.size.width
-                                         offset:0];
-    (*endPos).extendsToEndOfLine = endExtends;
+    positionRange.start = [lineBuffer positionForCoordinate:trimmedStart
+                                                      width:currentGrid_.size.width
+                                                     offset:0];
+    positionRange.end = [lineBuffer positionForCoordinate:trimmedEnd
+                                                    width:currentGrid_.size.width
+                                                   offset:0];
+    positionRange.end.extendsToEndOfLine = endExtends;
 
-    if (selectionEndPostionIsValid) {
-        *selectionEndPostionIsValid = (*endPos != nil);
+    if (positionRange.start && positionRange.end) {
+        return positionRange;
+    } else {
+        return nil;
     }
-    return YES;
 }
 
 - (BOOL)convertRange:(VT100GridCoordRange)range
@@ -3471,47 +3479,46 @@ static void SwapInt(int *a, int *b) {
                   to:(VT100GridCoordRange *)resultPtr
         inLineBuffer:(LineBuffer *)lineBuffer
 {
-    LineBufferPosition *selectionStartPosition;
-    LineBufferPosition *selectionEndPosition;
-    BOOL selectionStartPositionIsValid;
-    BOOL selectionEndPostionIsValid;
+    LineBufferPositionRange *selectionRange;
     
     // Temporarily swap in the passed-in linebuffer so the call below can access lines in the right line buffer.
     LineBuffer *savedLineBuffer = linebuffer_;
     linebuffer_ = lineBuffer;
-    BOOL hasSelection = [self getNullCorrectedSelectionStartPosition:&selectionStartPosition
-                                                         endPosition:&selectionEndPosition
-                                       selectionStartPositionIsValid:&selectionStartPositionIsValid
-                                          selectionEndPostionIsValid:&selectionEndPostionIsValid
-                                                        inLineBuffer:lineBuffer
-                                                            forRange:range];
+    selectionRange = [self positionRangeForCoordRange:range inLineBuffer:lineBuffer];
+    DLog(@"%@ -> %@", VT100GridCoordRangeDescription(range), selectionRange);
     linebuffer_ = savedLineBuffer;
-    if (!hasSelection) {
+    if (!selectionRange) {
+        // One case where this happens is when the start and end of the range are past the last
+        // character in the line buffer (e.g., all nulls). It could occur when a note exists on a
+        // null line.
         return NO;
     }
-    if (selectionStartPositionIsValid) {
-        resultPtr->start = [lineBuffer coordinateForPosition:selectionStartPosition
-                                                       width:newWidth
-                                                          ok:NULL];
-        if (selectionEndPostionIsValid) {
-            VT100GridCoord newEnd = [lineBuffer coordinateForPosition:selectionEndPosition width:newWidth ok:NULL];
-            newEnd.x++;
-            if (newEnd.x > newWidth) {
-                newEnd.y++;
-                newEnd.x -= newWidth;
-            }
-            resultPtr->end = newEnd;
-        } else {
-            resultPtr->end.x = currentGrid_.size.width;
-            resultPtr->end.y = [lineBuffer numLinesWithWidth:newWidth] + currentGrid_.size.height - 1;
+
+    resultPtr->start = [lineBuffer coordinateForPosition:selectionRange.start
+                                                   width:newWidth
+                                                      ok:NULL];
+    BOOL ok = NO;
+    VT100GridCoord newEnd = [lineBuffer coordinateForPosition:selectionRange.end
+                                                        width:newWidth
+                                                           ok:&ok];
+    if (ok) {
+        newEnd.x++;
+        if (newEnd.x > newWidth) {
+            newEnd.y++;
+            newEnd.x -= newWidth;
         }
-        if (selectionEndPosition.extendsToEndOfLine) {
-            resultPtr->end.x = newWidth;
-        }
-        return YES;
+        resultPtr->end = newEnd;
     } else {
-        return NO;
+        // I'm not sure how to get here. It would happen if the endpoint of the selection could
+        // be converted into a LineBufferPosition with the original width but that LineBufferPosition
+        // could not be converted back into a VT100GridCoord with the new width.
+        resultPtr->end.x = currentGrid_.size.width;
+        resultPtr->end.y = [lineBuffer numLinesWithWidth:newWidth] + currentGrid_.size.height - 1;
     }
+    if (selectionRange.end.extendsToEndOfLine) {
+        resultPtr->end.x = newWidth;
+    }
+    return YES;
 }
 
 - (void)incrementOverflowBy:(int)overflowCount {
@@ -3520,8 +3527,7 @@ static void SwapInt(int *a, int *b) {
 }
 
 // sets scrollback lines.
-- (void)setMaxScrollbackLines:(unsigned int)lines;
-{
+- (void)setMaxScrollbackLines:(unsigned int)lines {
     maxScrollbackLines_ = lines;
     [linebuffer_ setMaxLines: lines];
     if (!unlimitedScrollback_) {
@@ -3582,7 +3588,7 @@ static void SwapInt(int *a, int *b) {
     DebugLog(@"cursorToX:Y");
 }
 
-- (void)setUseColumnScrollRegion:(BOOL)mode;
+- (void)setUseColumnScrollRegion:(BOOL)mode
 {
     currentGrid_.useScrollRegionCols = mode;
     altGrid_.useScrollRegionCols = mode;
@@ -3704,11 +3710,11 @@ static void SwapInt(int *a, int *b) {
                 // Found a match in the text.
                 NSArray *allPositions = [linebuffer_ convertPositions:context.results
                                                             withWidth:currentGrid_.size.width];
-                int k = 0;
-                for (ResultRange* currentResultRange in context.results) {
+                const int numResults = context.results.count;
+                for (int k = 0; k < numResults; k++) {
                     SearchResult* result = [[SearchResult alloc] init];
 
-                    XYRange* xyrange = [allPositions objectAtIndex:k++];
+                    XYRange* xyrange = [allPositions objectAtIndex:k];
 
                     result->startX = xyrange->xStart;
                     result->endX = xyrange->xEnd;

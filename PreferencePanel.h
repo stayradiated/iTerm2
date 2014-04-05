@@ -89,12 +89,10 @@ typedef enum {
 + (PreferencePanel*)sharedInstance;
 + (PreferencePanel*)sessionsInstance;
 + (BOOL)migratePreferences;
-+ (BOOL)loadingPrefsFromCustomFolder;
 + (void)populatePopUpButtonWithBookmarks:(NSPopUpButton*)button selectedGuid:(NSString*)selectedGuid;
 
 - (void)openToBookmark:(NSString*)guid;
 
-- (BOOL)loadPrefs;
 - (void)updateBookmarkFields:(NSDictionary *)dict;
 
 - (void)triggerChanged:(TriggerController *)triggerController;
@@ -168,8 +166,8 @@ typedef enum {
 - (BOOL)optionClickMovesCursor;
 - (BOOL)passOnControlLeftClick;
 - (BOOL)maxVertically;
-- (BOOL)closingHotkeySwitchesSpaces;
-- (BOOL)useCompactLabel;
+- (BOOL)hideTabNumber;
+- (BOOL)hideTabCloseButton;
 - (BOOL)hideActivityIndicator;
 - (BOOL)highlightTabLabels;
 - (BOOL)hideMenuBarInFullscreen;
@@ -209,12 +207,14 @@ typedef enum {
 - (int)minCompactTabWidth;
 - (int)optimumTabWidth;
 - (BOOL)traditionalVisualBell;
+
+// A hidden preference. If set, the scroll wheel sends arrow keys in alt screen mode.
+- (BOOL)alternateMouseScroll;
 - (float)hotkeyTermAnimationDuration;
 - (NSString *)searchCommand;
+- (NSTimeInterval)antiIdleTimerPeriod;
 - (Profile *)handlerBookmarkForURL:(NSString *)url;
 - (void)changeFont:(id)fontManager;
-- (BOOL)prefsDifferFromRemote;
-- (NSString *)remotePrefsLocation;
 - (BOOL)customFolderChanged;
 - (BOOL)onScreen;
 - (NSTextField*)shortcutKeyTextField;

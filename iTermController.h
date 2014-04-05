@@ -32,13 +32,14 @@
 
 #define kApplicationDidFinishLaunchingNotification @"kApplicationDidFinishLaunchingNotification"
 
-@class PseudoTerminal;
-@class PTYTextView;
-@class ItermGrowlDelegate;
-@class PasteboardHistory;
 @class GTMCarbonHotKey;
+@class ItermGrowlDelegate;
+@protocol iTermWindowController;
+@class PasteboardHistory;
+@class PseudoTerminal;
 @class PTYSession;
 @class PTYTab;
+@class PTYTextView;
 
 @interface iTermController : NSObject
 {
@@ -97,7 +98,10 @@
 - (void)terminalWillClose:(PseudoTerminal*)theTerminalWindow;
 - (NSArray*)sortedEncodingList;
 - (void)addBookmarksToMenu:(NSMenu *)aMenu startingAt:(int)startingAt;
-- (void)addBookmarksToMenu:(NSMenu *)aMenu withSelector:(SEL)selector openAllSelector:(SEL)openAllSelector startingAt:(int)startingAt;
+- (void)addBookmarksToMenu:(NSMenu *)aMenu
+              withSelector:(SEL)selector
+           openAllSelector:(SEL)openAllSelector
+                startingAt:(int)startingAt;
 - (PseudoTerminal *)openWindow;
 - (id)launchBookmark:(NSDictionary *)bookmarkData
           inTerminal:(PseudoTerminal *)theTerm
@@ -122,6 +126,11 @@
 - (PseudoTerminal *)terminalWithTab:(PTYTab *)tab;
 - (PseudoTerminal *)terminalWithSession:(PTYSession *)session;
 
+// Indicates a rough guess as to whether a terminal window is substantially visible.
+// Being on another space will count as being obscured.
+// On OS 10.9+, if the window is completely covered by another app's window, it's obscured.
+// If other iTerm windows cover more than ~40% of |terminal| then it's obscured.
+- (BOOL)terminalIsObscured:(id<iTermWindowController>)terminal;
 
 @end
 

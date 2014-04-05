@@ -11,14 +11,6 @@
 
 extern NSString *kWindowPasteboardType;
 
-@interface TmuxSessionsTable (Private)
-
-- (NSString *)nameForNewSession;
-- (NSString *)nameForNewSessionWithNumber:(int)n;
-- (void)updateEnabledStateOfButtons;
-
-@end
-
 @implementation TmuxSessionsTable
 
 @synthesize delegate = delegate_;
@@ -44,7 +36,7 @@ extern NSString *kWindowPasteboardType;
     [super dealloc];
 }
 
-- (void)setDelegate:(NSObject<TmuxSessionsTableProtocol> *)delegate;
+- (void)setDelegate:(NSObject<TmuxSessionsTableProtocol> *)delegate
 {
     delegate_ = delegate;
     [self setSessions:[delegate_ sessions]];
@@ -184,9 +176,8 @@ extern NSString *kWindowPasteboardType;
     }
 }
 
-@end
 
-@implementation TmuxSessionsTable (Private)
+#pragma mark - Private
 
 - (NSString *)nameForNewSessionWithNumber:(int)n
 {

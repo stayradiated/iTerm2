@@ -57,8 +57,10 @@ int decode_utf8_char(const unsigned char * restrict datap,
 + (BOOL)isDoubleWidthCharacter:(int)unicode
         ambiguousIsDoubleWidth:(BOOL)ambiguousIsDoubleWidth;
 
-- (NSMutableString *)stringReplaceSubstringFrom:(NSString *)oldSubstring to:(NSString *)newSubstring;
 - (NSString *)stringWithEscapedShellCharacters;
+
+// Replaces tab with ^V + tab.
+- (NSString *)stringWithShellEscapedTabs;
 
 // Properly escapes chars for a string to stick in a URL query param.
 - (NSString*)stringWithPercentEscape;
@@ -96,6 +98,13 @@ int decode_utf8_char(const unsigned char * restrict datap,
 - (NSString *)URLInStringWithOffset:(int *)offset length:(int *)length;
 
 - (NSString *)stringByEscapingForURL;
+- (NSString *)stringByCapitalizingFirstLetter;
+
+- (NSString *)hexOrDecimalConversionHelp;
+
+// String starts with http:// or https://. Used to tell if a custom prefs
+// location is a path or URL.
+- (BOOL)stringIsUrlLike;
 
 @end
 
